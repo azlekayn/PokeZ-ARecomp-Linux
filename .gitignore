@@ -1,0 +1,28 @@
+# your own game files and what's made from them (building from source puts them here)
+input/
+extracted/
+generated/
+generated-*/
+generated[0-9]*/
+/rando/
+# Nintendo fonts (users import their own; only the README ships)
+/fonts/*
+!/fonts/README.md
+# build output, caches, saves and settings
+build/
+/cache/
+save/
+/larecomp.ini
+/gamecontrollerdb.txt
+# tools and Python environments (machine-specific)
+tools/venv/
+venv/
+__pycache__/
+.DS_Store
+
+# texture dumps and HD packs (game art: users make their own)
+/textures/
+/mods/
+/tools/hdtools/
+# Claude Code: machine-specific notes
+CLAUDE.local.md
