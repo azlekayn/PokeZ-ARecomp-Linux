@@ -306,6 +306,7 @@ void settings_save(void) {
     fprintf(f, "indirect_light = %d\n", g_settings.ssgi);
     fprintf(f, "indirect_light_strength = %d\n", g_settings.ssgi_strength);
     fprintf(f, "water_reflections = %d\n", g_settings.water_ssr);
+    fprintf(f, "temporal_aa = %s\n", g_settings.taa ? "fsr2" : "game");  // (PR#57 parsed it but never saved it)
     fprintf(f, "tex_dump = %d\n", g_settings.tex_dump);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
