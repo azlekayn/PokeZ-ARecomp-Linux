@@ -74,6 +74,11 @@ Implemented from scratch on top of #57's depth-derived motion vectors.
 - `tools/za_patches.py`: new patch at `FRAME_DT[build] = ZA_BUILDS[build] - 0x68` replacing the duration load
   with `rt_za_frame_dt(LD64(c->x[1] + 8))` (falls back to the plain load if the instruction isn't `0xf9400428`).
 - **This changes the generator → GAMELIB_ID changes → the start screen will ask "Compile now" once (~10–30 min).**
+  The user did this: `extracted/lasgame.so.id = e0a36a7d6da5179b-B1F12FD919EAE86A` (new id). No recompile needed
+  again for runtime-only fixes below.
+- **BUGFIX (user hit it):** the first `rt_za_frame_dt` kept a stall's backlog (`if (n>4) acc += (n-4)*step`), so the
+  loading stalls left a permanent surplus → 4 world steps/frame → fast-forward/"lag out". Fixed: account the whole
+  backlog (`acc -= n*step`) then clamp `n` to 4 (drop the excess). Build #17 (runtime-only; game lib unchanged).
 
 ## Frame-rate dips (diagnosed)
 - Not shader compilation (steady state logs `compile 0`).
