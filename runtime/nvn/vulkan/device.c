@@ -1579,23 +1579,11 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     renderer_submit();
     pp_mark(PP_SUBMIT);
     // frame generation (LARECOMP_FRAMEGEN; exec.c vk_fg_build): the frame between this and the last shown image, from
-    // the scene's motion vectors. The generated frame is the midpoint of the pair, so it goes out BEFORE the game's
-    // own frame below (after it the motion would read backwards). Its place in the window is the last frame's (the
-    // window rarely moves) - the first pair is skipped. LARECOMP_VK_PRESENT=fifo makes the display take them in order.
+    // the scene's motion vectors. Presented after the game's own frame below, so a game at 60 fps shows at 120.
     extern void vk_fg_build(TexBackend *cur, uint64_t frame);
     extern TexBackend *vk_fg_image;
     extern uint64_t vk_fg_frame;
-    static float fg_vx, fg_vy, fg_vw, fg_vh, fg_pv[8];
-    static bool fg_place;
     vk_fg_build(b, frame);
-    if (vk_fg_image && vk_fg_frame == frame && fg_place) {
-        static const float blackF[4] = {0, 0, 0, 1};
-        if (vk_frame_begin(blackF)) {
-            VkCommandBuffer cbf = vk_cmd();
-            vk_present_draw(cbf, vk_fg_image, fg_vx, fg_vy, fg_vw, fg_vh, fg_pv);
-            vk_frame_end(NULL);
-        }
-    }
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);
@@ -1664,7 +1652,6 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         float pv[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
         memcpy(g_shot_crop, crop, sizeof crop);
         vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
-        fg_vx = (float)vx, fg_vy = (float)vy, fg_vw = (float)vw, fg_vh = (float)vh, memcpy(fg_pv, pv, sizeof fg_pv), fg_place = true;
         pp_mark(PP_BLIT);
         static long menu_at = -1;
         if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
@@ -1678,6 +1665,16 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         bool shot = win_shot && (long)frame + 1 == win_shot;
         vk_frame_end(shot ? "build/window.png" : NULL);
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) exit_after_shot();
+        if (vk_fg_image && vk_fg_frame == frame) {  // frame generation: the generated frame, after the game's own
+            static const float black2[4] = {0, 0, 0, 1};
+            static uint64_t nfg;
+            if (nfg++ < 6 || frame % 300 == 0) LOG("[fg] presenting the generated frame %llu\n", (unsigned long long)frame);
+            if (vk_frame_begin(black2)) {
+                VkCommandBuffer cb2 = vk_cmd();
+                vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);
+                vk_frame_end(NULL);
+            }
+        }
     } else {
         renderer_submit();
     }
