@@ -8658,11 +8658,19 @@ bool vk_fg_on(void) {
 }
 
 void vk_fg_build(TexBackend *cur, uint64_t frame) {
-    vk_fg_image = NULL;
-    if (!vk_fg_on() || !cur || !cur->image || (cur->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;
-    uint32_t w = cur->width, h = cur->height;
+    extern bool ui_window_focused(void);
     static TexBackend prev, interp;
     static uint64_t prev_frame;
+    vk_fg_image = NULL;
+    // Unfocused (alt-tabbed): the compositor can hold the swapchain's images, and the generated frame's second
+    // acquire + present then stalls the render thread - once behind, the frame rate never recovers (measured: a steady
+    // 60 -> ~52 for the rest of the session after a focus change, while presenting once stays at 60). So present only
+    // the game's own frame while unfocused, and drop the gap: the first frame back is not interpolated across it.
+    if (!vk_fg_on() || !ui_window_focused() || !cur || !cur->image || (cur->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) {
+        prev_frame = 0;
+        return;
+    }
+    uint32_t w = cur->width, h = cur->height;
     if (!fg_image(&prev, w, h) || !fg_image(&interp, w, h)) return;
     bool valid = vk_fg_mv && vk_fg_mv->image && vk_fg_mv_frame == frame && vk_fg_mv->width == w &&
                  vk_fg_mv->height == h && prev_frame + 1 == frame;
