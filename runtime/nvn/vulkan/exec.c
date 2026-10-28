@@ -8684,7 +8684,7 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
                 {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
             VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 3, .pBindings = bd};
             VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &dsl));
-            VkPushConstantRange pcr = {.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, .size = 16};
+            VkPushConstantRange pcr = {.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, .size = 32};
             VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
                                              .pSetLayouts = &dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr};
             VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &layout));
@@ -8743,8 +8743,11 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
         VkRect2D sc = {{0, 0}, {w, h}};
         rec_CmdSetViewport(cb, 0, 1, &vp);
         rec_CmdSetScissor(cb, 0, 1, &sc);
-        float pc[4] = {1.0f / (float)w, 1.0f / (float)h, (float)w, (float)h};
-        rec_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, pc);
+        static float thresh = -1, strength = -1;  // LARECOMP_FG_THRESH=<px> (interpolate above it), LARECOMP_FG_STRENGTH=<0..1>
+        if (thresh < 0) { const char *e = ENV("LARECOMP_FG_THRESH"); thresh = e ? (float)atof(e) : 2.0f; }
+        if (strength < 0) { const char *e = ENV("LARECOMP_FG_STRENGTH"); strength = e ? (float)atof(e) : 1.0f; }
+        float pc[8] = {1.0f / (float)w, 1.0f / (float)h, (float)w, (float)h, thresh, strength, 0, 0};
+        rec_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
         fullscreen_vertex_bind(cb);
         rec_CmdDraw(cb, 3, 1, 0, 0);
         rec_CmdEndRendering(cb);

@@ -363,12 +363,18 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(set = 0, binding = 0) uniform sampler2D prev;\n"
                "layout(set = 0, binding = 1) uniform sampler2D cur;\n"
                "layout(set = 0, binding = 2) uniform sampler2D mv;\n"
-               "layout(push_constant) uniform P { vec4 sz; } pc;\n"  // (1/w, 1/h, w, h)
+               "layout(push_constant) uniform P { vec4 sz; vec4 par; } pc;\n"  // (1/w, 1/h, w, h), (threshold px, strength, -, -)
                "layout(location = 0) out vec4 o;\n"
                "void main() {\n"
                "  vec2 uv = gl_FragCoord.xy * pc.sz.xy;\n"
-               "  vec2 m = texture(mv, uv).xy * pc.sz.xy;\n"
-               "  o = vec4(mix(texture(cur, uv - 0.5 * m).rgb, texture(prev, uv + 0.5 * m).rgb, 0.5), 1.0);\n"
+               "  vec3 curc = texture(cur, uv).rgb;\n"
+               "  vec2 mvp = texture(mv, uv).xy;\n"  // motion in pixels (current -> previous)
+               // Interpolate only where the picture actually moves: under the threshold (a still camera, the HUD, a menu)
+               // the exact current frame is shown - sharp, and the UI can't flicker. par.y scales the effect down.
+               "  float t = pc.par.x > 0.0 ? clamp(length(mvp) / pc.par.x, 0.0, 1.0) * pc.par.y : pc.par.y;\n"
+               "  vec2 m = mvp * pc.sz.xy;\n"
+               "  vec3 mid = mix(texture(cur, uv - 0.5 * m).rgb, texture(prev, uv + 0.5 * m).rgb, 0.5);\n"
+               "  o = vec4(mix(curc, mid, t), 1.0);\n"
                "}\n";
     }
     // ---- post passes before the present (Video tab "Anti-aliasing" / "Upscaler"): exec.c vk_present_draw.
