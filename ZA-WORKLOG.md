@@ -99,7 +99,8 @@ Implemented from scratch on top of #57's depth-derived motion vectors.
 - `/tmp/opencode/shots/` holds A/B screenshots (black world, fixed, FSR2, FG).
 
 ## PENDING / NEXT
-1. **Rebuild the AppImage** after the band fix (build #15 was pre-fix).
+1. ~~Rebuild the AppImage after the band fix~~ — **DONE (build #16 succeeded, 2026-10-28)**. The current
+   `build/dist/LAS Recomp-v0.1.10-linux-x86_64.AppImage` includes the decoupling patch + band fix.
 2. User launches the AppImage → click **"Compile now"** once (generator changed).
 3. Test: `LARECOMP_FRAMEGEN=1 ~/ZA-Recomp.sh` (ini: `resolution=1x`, `temporal_aa=game`, `dynamic_res=off`).
    Compare with/without `LARECOMP_FRAME_DT=0` for the slow-motion fix; check FG smoothness/sharpness
