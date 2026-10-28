@@ -103,6 +103,14 @@ Implemented from scratch on top of #57's depth-derived motion vectors.
   `14ba0fa` temporal_aa save → motion-fade → overlay replay → decoupling patch + band fix.
 - `/tmp/opencode/shots/` holds A/B screenshots (black world, fixed, FSR2, FG).
 
+
+## Frame gen + alt-tab (FIXED, build #18)
+Measured: FG ON, a focus change (alt-tab) dropped a steady 60 to ~52 for the rest of the session (the render thread's
+`wait` grew 7->91 ms; `recorder (present) 1103 ms`, `vkAcquireNextImageKHR 62 ms`). FG OFF stayed 60.0 across focus
+events. Fix: `vk_fg_build` presents only the game's own frame while `!ui_window_focused()` (and drops the gap so the
+first frame back isn't interpolated across it). Runtime-only. If it still sags after refocus, next lever: recreate the
+swapchain / reset pacing on focus gain (the port's present-watch already does this for a stale window).
+
 ## PENDING / NEXT
 1. ~~Rebuild the AppImage after the band fix~~ — **DONE (build #16 succeeded, 2026-10-28)**. The current
    `build/dist/LAS Recomp-v0.1.10-linux-x86_64.AppImage` includes the decoupling patch + band fix.
