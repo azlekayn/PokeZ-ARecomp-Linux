@@ -468,6 +468,13 @@ static void tab_display(void) {
             if (g_settings.fps60 && g_fps60_fell_back)
                 ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",
                                    TR("Running at 30 fps: this PC didn't keep 60 fps.", "Rodando a 30 fps: este PC não segurou 60 fps."));
+            opt_toggle(TR("Constant game speed", "Velocidade constante"), &g_settings.frame_dt, true,
+                       TR("The world runs at the same speed at any frame rate: the game's step comes from a fixed-timestep "
+                          "accumulator, so 57 fps plays at 57 fps of game, not 95% of it. Off: the game's own step - below "
+                          "60 fps everything moves in slow motion (as on the Switch).",
+                          "O mundo roda na mesma velocidade em qualquer taxa de quadros: o passo do jogo vem de um "
+                          "acumulador de passo fixo, então 57 fps joga a 57 fps de jogo, não 95%. Desligado: o passo do "
+                          "próprio jogo - abaixo de 60 fps tudo fica em câmera lenta (como no Switch)."));
         }
     }
     {   // (runtime/nvn/vulkan/textures.c vk_sampler_settings: every sampler made again, at once)
@@ -713,6 +720,43 @@ static void tab_display(void) {
                           "grades, corrimões, folhas e linhas finas ficam lisos e param de tremular quando você anda. Usa um "
                           "pouco da GPU. Com ele ligado, o Anti-aliasing (SMAA) acima não é necessário.")))
             g_settings.taa = t == 1;
+    }
+#endif
+#ifndef __APPLE__
+    {   // frame generation (vulkan/exec.c vk_fg_build; Pokémon Z-A's depth-derived motion vectors)
+        extern bool g_za_frame_hook;
+        if (!la && g_za_frame_hook) {
+            opt_toggle(TR("Frame generation", "Geração de quadros"), &g_settings.framegen, false,
+                       TR("Shows a generated frame between each two, so the game appears at twice its rate (60 -> 120). "
+                          "The generated frame blends the two around things that move; static things and the HUD keep the "
+                          "current frame. Needs Internal resolution 1x and Dynamic resolution off. Changes at once.",
+                          "Mostra um quadro gerado entre cada dois, então o jogo aparece no dobro da taxa (60 -> 120). O "
+                          "quadro gerado mistura os dois em volta do que se move; coisas paradas e o HUD ficam no quadro "
+                          "atual. Precisa de Resolução interna 1x e Resolução dinâmica desligada. Muda na hora."));
+            if (g_settings.framegen) {
+                float st = g_settings.fg_strength * 100.0f;
+                if (opt_slider(TR("Frame generation strength", "Intensidade da geração"), &st, 20, 100, 5, 100, "%g%%",
+                               TR("How far the generated frame moves toward the midpoint of the two: 100% exactly "
+                                  "between, less for a shorter, safer step (less warping at the edges of the image).",
+                                  "O quanto o quadro gerado avança até o meio dos dois: 100% exatamente no meio, menos "
+                                  "para um passo menor e mais seguro (menos distorção nas bordas da imagem).")))
+                    g_settings.fg_strength = st / 100.0f;
+                opt_slider(TR("Frame generation threshold", "Limite da geração"), &g_settings.fg_thresh, 0.5f, 8.0f, 0.5f,
+                           2.0f, "%g px",
+                           TR("Pixels of motion under which part of the picture keeps the current frame instead of being "
+                              "blended: higher is safer (static text and thin edges stay sharp), lower interpolates more.",
+                              "Pixels de movimento abaixo dos quais uma parte da imagem fica no quadro atual em vez de ser "
+                              "misturada: maior é mais seguro (texto parado e bordas finas ficam nítidos), menor interpola mais."));
+                if (g_settings.res_mode != RES_MATCH && g_settings.res_mode != 1)
+                    ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",
+                                       TR("Showing the game's own frames only: set Internal resolution to 1x.",
+                                          "Mostrando só os quadros do jogo: defina a Resolução interna em 1x."));
+                else if (g_settings.game_drs)
+                    ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",
+                                       TR("Showing the game's own frames only: set Dynamic resolution off.",
+                                          "Mostrando só os quadros do jogo: desligue a Resolução dinâmica."));
+            }
+        }
     }
 #endif
 

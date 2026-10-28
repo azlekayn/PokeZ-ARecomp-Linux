@@ -37,6 +37,9 @@ Settings g_settings = {
     .shadow_sharp = 1,
     .gtao_strength = 100,
     .ssgi_strength = 100,
+    .fg_strength = 1.0f,   // (frame generation: the full midpoint blend)
+    .fg_thresh = 2.0f,     // (px of motion; static things keep the current frame)
+    .frame_dt = true,      // (the world step from a fixed-timestep accumulator: the same speed at any frame rate)
     .inv_keys = true,
     .tracker = true,
     .tracker_filters = -1,
@@ -139,12 +142,23 @@ void settings_resolve_defaults(bool integrated) {
         g_settings.antialias == AA_SMAA ? "smaa" : "off");
 }
 
+// LARECOMP_FRAMEGEN / LARECOMP_FRAME_DT / LARECOMP_FG_STRENGTH / LARECOMP_FG_THRESH: a test / launcher override for the
+// frame generation settings. Applied to g_settings at load, so the F1 menu shows (and can edit) the value they set;
+// not read again after that - change the setting in F1 to keep a value across starts.
+static void settings_env_overrides(void) {
+    const char *e;
+    if ((e = getenv("LARECOMP_FRAMEGEN"))) g_settings.framegen = atoi(e) != 0;
+    if ((e = getenv("LARECOMP_FRAME_DT"))) g_settings.frame_dt = atoi(e) != 0;
+    if ((e = getenv("LARECOMP_FG_STRENGTH"))) { float v = (float)atof(e); g_settings.fg_strength = v < 0 ? 0 : v > 1 ? 1 : v; }
+    if ((e = getenv("LARECOMP_FG_THRESH"))) { float v = (float)atof(e); g_settings.fg_thresh = v < 0 ? 0 : v > 16 ? 16 : v; }
+}
+
 void settings_load(void) {
     static bool loaded;
     if (loaded) return;
     loaded = true;
     FILE *f = fopen(SETTINGS_FILE, "r");
-    if (!f) return;
+    if (!f) { settings_env_overrides(); return; }
     char line[1200];
     bool tip_key = false, aspect_key = false;
     while (fgets(line, sizeof line, f)) {
@@ -207,6 +221,10 @@ void settings_load(void) {
             for (int i = 0; i < SHARPEN_N; i++) if (!strcmp(val, sharpen_names[i])) g_settings.sharpen = i;
         }
         else if (!strcmp(key, "temporal_aa")) g_settings.taa = !strcmp(val, "fsr2");
+        else if (!strcmp(key, "framegen")) g_settings.framegen = atoi(val) != 0;
+        else if (!strcmp(key, "fg_strength")) { float v = (float)atof(val); g_settings.fg_strength = v < 0 ? 0 : v > 1 ? 1 : v; }
+        else if (!strcmp(key, "fg_thresh")) { float v = (float)atof(val); g_settings.fg_thresh = v < 0 ? 0 : v > 16 ? 16 : v; }
+        else if (!strcmp(key, "frame_dt")) g_settings.frame_dt = atoi(val) != 0;
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
         else if (!strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;
@@ -277,6 +295,7 @@ void settings_load(void) {
     if (g_settings.volume > 2) g_settings.volume = 2;
     if (!(g_settings.mouse_sens >= 0.1f && g_settings.mouse_sens <= 5)) g_settings.mouse_sens = 1.0f;
     if (g_settings.rumble_strength < 25 || g_settings.rumble_strength > 100) g_settings.rumble_strength = 100;
+    settings_env_overrides();  // (LARECOMP_FRAMEGEN etc.: tests and the launcher script)
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
 }
 
@@ -307,6 +326,10 @@ void settings_save(void) {
     fprintf(f, "indirect_light_strength = %d\n", g_settings.ssgi_strength);
     fprintf(f, "water_reflections = %d\n", g_settings.water_ssr);
     fprintf(f, "temporal_aa = %s\n", g_settings.taa ? "fsr2" : "game");  // (PR#57 parsed it but never saved it)
+    fprintf(f, "framegen = %d\n", g_settings.framegen);
+    fprintf(f, "fg_strength = %.2f\n", g_settings.fg_strength);
+    fprintf(f, "fg_thresh = %.1f\n", g_settings.fg_thresh);
+    fprintf(f, "frame_dt = %d\n", g_settings.frame_dt);
     fprintf(f, "tex_dump = %d\n", g_settings.tex_dump);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");

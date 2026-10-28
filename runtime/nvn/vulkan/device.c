@@ -918,6 +918,16 @@ bool vk_frame_begin(const float clear[4]) {
     // on the same swapchain are not allowed at the same time - and it may have asked for a new swapchain
     WAITING(rec_wait_presents(rec_presents_queued()));
     if (rec_present_recreate()) recreate_swapchain();
+    {   // Focus gain: a compositor may leave the swapchain stale across an alt-tab (the acquires then block, once
+        // behind the frame rate never recovers - the frame gen alt-tab finding). Opt-in test lever, off by default:
+        // LARECOMP_FOCUS_REBUILD=1 rebuilds the swapchain on the first frame back with the focus.
+        extern bool ui_window_focused(void);
+        static int focus_rebuild = -1, was_focused;
+        if (focus_rebuild < 0) focus_rebuild = ENV("LARECOMP_FOCUS_REBUILD") != NULL;
+        int focused = ui_window_focused() ? 1 : 0;
+        if (focus_rebuild && focused && !was_focused) recreate_swapchain();
+        was_focused = focused;
+    }
     if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) recreate_swapchain();
     else if (g_vk.hdr != (g_vk.hdr_capable && g_settings.hdr && !ENV("LARECOMP_NO_HDR"))) recreate_swapchain();  // (HDR switched)
     if (!g_vk.swapchain) return false;
@@ -1596,8 +1606,9 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     // Its GPU time is counted, and the window image's submission's from after its wait (exec.c gpu_timer_add)
     renderer_submit();
     pp_mark(PP_SUBMIT);
-    // frame generation (LARECOMP_FRAMEGEN; exec.c vk_fg_build): the frame between this and the last shown image, from
-    // the scene's motion vectors. Presented after the game's own frame below, so a game at 60 fps shows at 120.
+    // frame generation (F1 > Video > Rendering "Frame generation"; exec.c vk_fg_build): the frame between this and the
+    // last shown image, from the scene's motion vectors. Presented after the game's own frame below, so a game at 60 fps
+    // shows at 120.
     extern void vk_fg_build(TexBackend *cur, uint64_t frame);
     extern TexBackend *vk_fg_image;
     extern uint64_t vk_fg_frame;
@@ -1686,7 +1697,12 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         if (vk_fg_image && vk_fg_frame == frame) {  // frame generation: the generated frame, after the game's own
             static const float black2[4] = {0, 0, 0, 1};
             static uint64_t nfg;
-            if (nfg++ < 6 || frame % 300 == 0) LOG("[fg] presenting the generated frame %llu\n", (unsigned long long)frame);
+            static int fglog = -1;
+            if (fglog < 0) fglog = getenv("LARECOMP_FG_LOG") != NULL;  // (off: not per-frame log spam)
+            if (fglog && (nfg < 6 || frame % 300 == 0)) {
+                nfg++;
+                LOG("[fg] presenting the generated frame %llu\n", (unsigned long long)frame);
+            }
             if (vk_frame_begin(black2)) {
                 VkCommandBuffer cb2 = vk_cmd();
                 vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);

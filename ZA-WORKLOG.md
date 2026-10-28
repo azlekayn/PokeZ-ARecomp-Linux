@@ -128,6 +128,41 @@ swapchain / reset pacing on focus gain (the port's present-watch already does th
 3. Test: `LARECOMP_FRAMEGEN=1 ~/ZA-Recomp.sh` (ini: `resolution=1x`, `temporal_aa=game`, `dynamic_res=off`).
    Compare with/without `LARECOMP_FRAME_DT=0` for the slow-motion fix; check FG smoothness/sharpness
    (`LARECOMP_FG_STRENGTH`, `LARECOMP_FG_THRESH`).
-4. If good: make FG + strength a proper **F1 menu / ini setting** (`framegen = 1`).
+4. If good: make FG + strength a proper **F1 menu / ini setting** (`framegen = 1`). — **DONE (build #19, below)**
 5. Optional: if the in-game HUD (not the ImGui overlay) ever warps under FG, composite the game's own HUD
    onto generated frames (needs it kept separate — a larger change).
+
+## Build #19 — FG + frame_dt as settings, focus lever (2026-10-28)
+- Env-only knobs are now settings + F1 rows (runtime/settings.{c,h}, runtime/ui/menu.mm):
+  - `framegen` (bool), `fg_strength` (0..1; the menu shows 20–100%), `fg_thresh` (px) — F1 > Video > Rendering,
+    under Temporal anti-aliasing. `resolution=1x` + Dynamic off are shown as a warning when unmet.
+  - `frame_dt` (bool, default **on**) — F1 > Video > "Constant game speed", under Frame rate.
+  - `LARECOMP_FRAMEGEN` / `LARECOMP_FRAME_DT` / `LARECOMP_FG_STRENGTH` / `LARECOMP_FG_THRESH` still work: they
+    override the settings **at load** (so the menu shows/edits what they set), and are not read afterwards.
+    Runtime reads g_settings (`exec.c vk_fg_on`/`vk_fg_build`, `hle/framepace.c rt_za_frame_dt`).
+- `[fg]` per-frame log spam removed (both "frame N: valid=1" and "presenting the generated frame"): set
+  `LARECOMP_FG_LOG=1` to get it back.
+- New env lever for the post-alt-tab sag: `LARECOMP_FOCUS_REBUILD=1` rebuilds the swapchain on the first frame back
+  with the focus (device.c vk_frame_begin). **Off by default.**
+- AppImage rebuilt (build #19). Smoke run (hidden, scratch save) boots at **60.0 fps**, settings load, no [fg] spam.
+
+## Dips: the heavy #57 options are NOT the cause (log evidence)
+- The 17:30 FG-off run's `larecomp.ini` already had `ambient_occlusion=0`, `indirect_light=0`, `water_reflections=0`,
+  `temporal_aa=game`, `resolution=1x` — and it still dipped at **t≈157–169** (60 → 56.9 → 31.5 → 19.9 → ~58). So the
+  ~360 dispatches / 720 flushes per 2 s are the game's own (or the MV build), not the #57 effects. No need to retest
+  with them off; the earlier "enabled" reading predates the 17:25 ini.
+- The dip lines up with `[window] focus lost` (t=160.3); the recovery with `[window] focus gained` (t=173.0). The
+  `[slow]` frames just before (9519–9565) are `vsync/pace wait` (the pacer) + `full texture hash` + `queue wait`
+  (the render thread waiting for the recorder, which is stuck in the present). Focus was also lost for ~110 s earlier
+  (t=38→149) **with a clean 60**, so it is the *transition*, not "unfocused" per se.
+- Separate hard stall: `vkAcquireNextImageKHR … 1391 ms` at frame 872 (startup) — a compositor swapchain-acquire stall.
+- Next levers to test: `LARECOMP_FOCUS_REBUILD=1`; and staggering the periodic texture full-hash recheck
+  (textures.c `frame - b->full_frame >= recheck`, every 600 frames) so the 10 s safety-net bursts don't cluster.
+
+## Tests to run (build #19)
+1. FG **off** (open F1 > Video, ensure Frame generation is Off; remove `LARECOMP_FRAMEGEN` from the launcher so the
+   menu controls it), fullscreen + focused, no alt-tab, 5 min → does it hold 60?
+2. FG off, alt-tab away ~10 s and back a few times, with and without `LARECOMP_FOCUS_REBUILD=1` → does it recover?
+3. FG **on** (`framegen=1` in F1 or `LARECOMP_FRAMEGEN=1`), alt-tab → does build #18's "present once while unfocused"
+   hold 60? (`LARECOMP_FG_LOG=1` shows `[fg] presenting the generated frame` again.)
+4. FG on, check the F1 rows (strength / threshold) change the picture live.

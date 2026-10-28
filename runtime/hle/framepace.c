@@ -103,13 +103,12 @@ static bool fps60_holds(void) {
 // simulation tracks wall-clock time at any frame rate (and still lands exactly on 60 / 30). LARECOMP_FRAME_DT=0: the
 // game's own duration, as before.
 uint64_t rt_za_frame_dt(uint64_t real_ns) {
-    static int on = -1;
-    if (on < 0) {
-        const char *e = ENV("LARECOMP_FRAME_DT");
-        on = !e || atoi(e) != 0;
-    }
-    if (!on) return real_ns;
+    // (F1 > Video > Frame rate: the "frame_dt" setting, runtime/settings.c; LARECOMP_FRAME_DT is its load-time
+    // override). The accumulator resets when it is (re)enabled, so a stall before that is never carried across.
     static uint64_t acc;
+    static bool was_on;
+    if (!g_settings.frame_dt) { was_on = false; return real_ns; }
+    if (!was_on) { acc = 0; was_on = true; }
     const uint64_t step = 16666667ull;  // (the game's fixed step: 1/60 s)
     // The game's own bands, by its strict `>` thresholds (16,666,667 / 33,333,366 / 50,000,000 / 66,666,667 ns): a
     // duration of band[n] reads as n vsyncs. (n is not exactly band-based: its thresholds round.)

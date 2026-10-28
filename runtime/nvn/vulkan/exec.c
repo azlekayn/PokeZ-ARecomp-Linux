@@ -8620,7 +8620,8 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
 
 // ---- frame generation: the frame between the last two shown images (fg_interp.frag), from their colour and the
 // scene's motion vectors (vk_fg_mv). device.c calls this before the present and, when vk_fg_image is set, presents it
-// as the frame after the game's own (backend_present_now). LARECOMP_FRAMEGEN=1 on.
+// as the frame after the game's own (backend_present_now). F1 > Video > Rendering "Frame generation" (settings.c;
+// LARECOMP_FRAMEGEN is its load-time override).
 static bool fg_image(TexBackend *d, uint32_t w, uint32_t h) {
     if (d->image && (d->width != w || d->height != h)) {
         vk_views_forget(d);
@@ -8652,9 +8653,8 @@ static void fg_copy(VkCommandBuffer cb, VkImage src, VkImage dst, uint32_t w, ui
 }
 
 bool vk_fg_on(void) {
-    static int on = -1;
-    if (on < 0) on = ENV("LARECOMP_FRAMEGEN") ? atoi(ENV("LARECOMP_FRAMEGEN")) != 0 : 0;
-    return on != 0;
+    // (F1 > Video > Rendering: "Frame generation"; LARECOMP_FRAMEGEN is its load-time override, runtime/settings.c.)
+    return g_settings.framegen;
 }
 
 void vk_fg_build(TexBackend *cur, uint64_t frame) {
@@ -8674,11 +8674,14 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
     if (!fg_image(&prev, w, h) || !fg_image(&interp, w, h)) return;
     bool valid = vk_fg_mv && vk_fg_mv->image && vk_fg_mv_frame == frame && vk_fg_mv->width == w &&
                  vk_fg_mv->height == h && prev_frame + 1 == frame;
-    static int nlog;
-    if (nlog++ < 6 || frame % 300 == 0)
+    static int fglog = -1, nlog;
+    if (fglog < 0) fglog = ENV("LARECOMP_FG_LOG") != NULL;  // (off: the per-frame [fg] note is log spam)
+    if (fglog && (nlog < 6 || frame % 300 == 0)) {
+        nlog++;
         LOG("[fg] frame %llu: on=%d cur=%ux%u mv=%ux%u mvframe=%llu prev=%llu valid=%d\n", (unsigned long long)frame, vk_fg_on(), w, h,
             vk_fg_mv ? vk_fg_mv->width : 0, vk_fg_mv ? vk_fg_mv->height : 0, (unsigned long long)vk_fg_mv_frame,
             (unsigned long long)prev_frame, valid);
+    }
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     if (valid) {
@@ -8751,9 +8754,8 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
         VkRect2D sc = {{0, 0}, {w, h}};
         rec_CmdSetViewport(cb, 0, 1, &vp);
         rec_CmdSetScissor(cb, 0, 1, &sc);
-        static float thresh = -1, strength = -1;  // LARECOMP_FG_THRESH=<px> (interpolate above it), LARECOMP_FG_STRENGTH=<0..1>
-        if (thresh < 0) { const char *e = ENV("LARECOMP_FG_THRESH"); thresh = e ? (float)atof(e) : 2.0f; }
-        if (strength < 0) { const char *e = ENV("LARECOMP_FG_STRENGTH"); strength = e ? (float)atof(e) : 1.0f; }
+        // (F1 > Video > Rendering: Frame generation strength / threshold; read live from the settings.)
+        float thresh = g_settings.fg_thresh, strength = g_settings.fg_strength;
         float pc[8] = {1.0f / (float)w, 1.0f / (float)h, (float)w, (float)h, thresh, strength, 0, 0};
         rec_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
         fullscreen_vertex_bind(cb);
