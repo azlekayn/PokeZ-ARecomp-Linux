@@ -116,8 +116,8 @@ uint64_t rt_za_frame_dt(uint64_t real_ns) {
     static const uint64_t band[5] = {0, 16666668ull, 33333367ull, 50000001ull, 66666668ull};
     acc += real_ns;
     uint64_t n = acc / step;
-    acc -= n * step;
-    if (n > 4) { acc += (n - 4) * step; n = 4; }  // (the game's own most is 4; keep the rest for the frames after)
+    acc -= n * step;   // (all the backlog is accounted for; the remainder is under one step)
+    if (n > 4) n = 4;  // (the game's own most: a hitch steps at most 4 - the backlog is dropped, not fast-forwarded)
     return band[n];
 }
 
