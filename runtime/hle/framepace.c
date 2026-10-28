@@ -94,6 +94,30 @@ static bool fps60_holds(void) {
                 "Back to 30 fps (choose 60 again in F1 to retry).", 8);
     return false;
 }
+// ---- Pokémon Z-A: the world step decoupled from the frame rate (tools/za_patches.py)
+// The game's frame step (the function at f_7001b29660: `ldr x8, [x1, #8]`) is the number of 1/60 s vsyncs this frame
+// spanned, read from the frame's duration (16.7 ms -> 1, 33.3 -> 2, ...). At 57 fps a 17.5 ms frame still counts 1, so
+// the world runs at ~95 % speed: slow motion everywhere between 60 and 30 fps (only a frame spanning a whole extra
+// vsync catches up). tools/za_patches.py routes that read here instead: the duration we report comes from a
+// fixed-timestep accumulator - the step is the whole vsyncs owed, the fraction kept for the frames after - so the
+// simulation tracks wall-clock time at any frame rate (and still lands exactly on 60 / 30). LARECOMP_FRAME_DT=0: the
+// game's own duration, as before.
+uint64_t rt_za_frame_dt(uint64_t real_ns) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = ENV("LARECOMP_FRAME_DT");
+        on = !e || atoi(e) != 0;
+    }
+    if (!on) return real_ns;
+    static uint64_t acc;
+    const uint64_t step = 16666667ull;  // (the game's fixed step: 1/60 s)
+    acc += real_ns;
+    uint64_t n = acc / step;
+    acc -= n * step;
+    if (n > 4) { acc += (n - 4) * step; n = 4; }  // (the game's own most is 4; keep the rest for the frames after)
+    return n ? n * step + 1 : 0;  // (a duration in the band its thresholds read as n vsyncs)
+}
+
 int32_t rt_za_frame_cfg(int32_t cfg) {
     g_za_frame_hook = true;
     const char *e = ENV("LARECOMP_FPS");
