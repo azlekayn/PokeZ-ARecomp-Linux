@@ -111,6 +111,16 @@ events. Fix: `vk_fg_build` presents only the game's own frame while `!ui_window_
 first frame back isn't interpolated across it). Runtime-only. If it still sags after refocus, next lever: recreate the
 swapchain / reset pacing on focus gain (the port's present-watch already does this for a stale window).
 
+
+## UPDATED diagnosis (end of session)
+- FG off does NOT fully hold 60 either: the 17:25 FG-off run held a clean 60.0 for ~2.5 min, then dipped
+  (`56.9 -> 31.5 (max 96 ms) -> 59.5`) around focus events (~t=149-177). So the dip is partly general, not only FG.
+- The user enabled the heavy #57 options: `ambient_occlusion=2`, `indirect_light=3`, `water_reflections=1`
+  (`operation_mode=docked`, `resolution=1x`, `tex_hd=1`). Log shows ~360 dispatches + 720 flushes / 2 s (~6 compute
+  passes/frame) -> lots of render-thread work; suspected cause of the late "frame times climbing".
+  Try them OFF (F1 > Rendering) and/or `operation_mode=handheld`.
+- FG present count is 0 in FG-off logs; `[fg] valid=1` + "presenting the generated frame" confirm FG when on.
+
 ## PENDING / NEXT
 1. ~~Rebuild the AppImage after the band fix~~ — **DONE (build #16 succeeded, 2026-10-28)**. The current
    `build/dist/LAS Recomp-v0.1.10-linux-x86_64.AppImage` includes the decoupling patch + band fix.
