@@ -1667,6 +1667,8 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) exit_after_shot();
         if (vk_fg_image && vk_fg_frame == frame) {  // frame generation: the generated frame, after the game's own
             static const float black2[4] = {0, 0, 0, 1};
+            static uint64_t nfg;
+            if (nfg++ < 6 || frame % 300 == 0) LOG("[fg] presenting the generated frame %llu\n", (unsigned long long)frame);
             if (vk_frame_begin(black2)) {
                 VkCommandBuffer cb2 = vk_cmd();
                 vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);

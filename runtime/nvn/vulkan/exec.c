@@ -8656,6 +8656,11 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
     if (!fg_image(&prev, w, h) || !fg_image(&interp, w, h)) return;
     bool valid = vk_fg_mv && vk_fg_mv->image && vk_fg_mv_frame == frame && vk_fg_mv->width == w &&
                  vk_fg_mv->height == h && prev_frame + 1 == frame;
+    static int nlog;
+    if (nlog++ < 6 || frame % 300 == 0)
+        LOG("[fg] frame %llu: on=%d cur=%ux%u mv=%ux%u mvframe=%llu prev=%llu valid=%d\n", (unsigned long long)frame, on, w, h,
+            vk_fg_mv ? vk_fg_mv->width : 0, vk_fg_mv ? vk_fg_mv->height : 0, (unsigned long long)vk_fg_mv_frame,
+            (unsigned long long)prev_frame, valid);
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     if (valid) {
