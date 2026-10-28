@@ -111,11 +111,14 @@ uint64_t rt_za_frame_dt(uint64_t real_ns) {
     if (!on) return real_ns;
     static uint64_t acc;
     const uint64_t step = 16666667ull;  // (the game's fixed step: 1/60 s)
+    // The game's own bands, by its strict `>` thresholds (16,666,667 / 33,333,366 / 50,000,000 / 66,666,667 ns): a
+    // duration of band[n] reads as n vsyncs. (n is not exactly band-based: its thresholds round.)
+    static const uint64_t band[5] = {0, 16666668ull, 33333367ull, 50000001ull, 66666668ull};
     acc += real_ns;
     uint64_t n = acc / step;
     acc -= n * step;
     if (n > 4) { acc += (n - 4) * step; n = 4; }  // (the game's own most is 4; keep the rest for the frames after)
-    return n ? n * step + 1 : 0;  // (a duration in the band its thresholds read as n vsyncs)
+    return band[n];
 }
 
 int32_t rt_za_frame_cfg(int32_t cfg) {
