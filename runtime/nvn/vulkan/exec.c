@@ -6516,8 +6516,12 @@ static void draw_(CmdRec *r, bool indexed) {
         extern void widescreen_scene_ubo(const float *u, uint64_t size);  // (the camera's view-projection)
         if (st.ubuf[0][5].addr) widescreen_scene_ubo((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].size);
     }
+    extern bool vk_fg_on(void);
     mv_note_draw(pr);
-    if (fsr2_wanted() && fsr2_copy(pr)) return;  // (FSR 2 resolved the frame in place of the game's copy)
+    // FSR 2's copy site also builds the depth-derived motion vectors; frame generation needs those on their own, with
+    // FSR 2's temporal AA off (its HUD flicker), so this runs for either. fsr2_copy returns true only when FSR 2
+    // actually replaced the game's copy.
+    if ((fsr2_wanted() || vk_fg_on()) && fsr2_copy(pr)) return;
     if (g_debug_frame) debug_draw(pr, r, indexed);
     if (ct_on()) ct_draw(pr, "draw");
     alias_draw_check();
@@ -8029,6 +8033,8 @@ static bool fsr2_copy(Prog *pr) {
     rec_CmdDraw(cb, 3, 1, 0, 0);
     rec_CmdEndRendering(cb);
     vk_full_barrier(cb);
+    vk_fg_mv = mvb, vk_fg_mv_frame = f;  // (frame generation: the vectors, whether or not FSR 2 resolves below)
+    if (!fsr2_wanted()) return false;    // FSR 2 off: the game's own edge-AA copy stays; the vectors are all FG needs
     // ---- FSR 2
     static uint64_t last_ns;
     uint64_t now = plat_now_ns();
@@ -8645,11 +8651,15 @@ static void fg_copy(VkCommandBuffer cb, VkImage src, VkImage dst, uint32_t w, ui
     vk_full_barrier(cb);
 }
 
-void vk_fg_build(TexBackend *cur, uint64_t frame) {
+bool vk_fg_on(void) {
     static int on = -1;
     if (on < 0) on = ENV("LARECOMP_FRAMEGEN") ? atoi(ENV("LARECOMP_FRAMEGEN")) != 0 : 0;
+    return on != 0;
+}
+
+void vk_fg_build(TexBackend *cur, uint64_t frame) {
     vk_fg_image = NULL;
-    if (!on || !cur || !cur->image || (cur->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;
+    if (!vk_fg_on() || !cur || !cur->image || (cur->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;
     uint32_t w = cur->width, h = cur->height;
     static TexBackend prev, interp;
     static uint64_t prev_frame;
@@ -8658,7 +8668,7 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
                  vk_fg_mv->height == h && prev_frame + 1 == frame;
     static int nlog;
     if (nlog++ < 6 || frame % 300 == 0)
-        LOG("[fg] frame %llu: on=%d cur=%ux%u mv=%ux%u mvframe=%llu prev=%llu valid=%d\n", (unsigned long long)frame, on, w, h,
+        LOG("[fg] frame %llu: on=%d cur=%ux%u mv=%ux%u mvframe=%llu prev=%llu valid=%d\n", (unsigned long long)frame, vk_fg_on(), w, h,
             vk_fg_mv ? vk_fg_mv->width : 0, vk_fg_mv ? vk_fg_mv->height : 0, (unsigned long long)vk_fg_mv_frame,
             (unsigned long long)prev_frame, valid);
     vk_end_pass();
