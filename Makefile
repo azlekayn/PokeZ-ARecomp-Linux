@@ -176,7 +176,7 @@ $(B)/rt/nvn/vulkan/fsr2_shaders.o: CXXFLAGS += -I$(B)/inc
 FSR2_OBJ := $(B)/fsr2/ffx_fsr2.o $(B)/fsr2/ffx_assert.o $(B)/fsr2/vk/ffx_fsr2_vk.o
 $(B)/fsr2/%.o: third_party/fsr2/%.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -Wno-absolute-value -c $< -o $@
+	$(CXX) $(CXXFLAGS) -DFFX_GCC -Wno-absolute-value -c $< -o $@
 
 # The shader preparation's variant list (runtime/nvn/shader_prep.h: no shader code, hashes and pipeline state only)
 # as a C string for runtime/nvn/shader_prep.c
