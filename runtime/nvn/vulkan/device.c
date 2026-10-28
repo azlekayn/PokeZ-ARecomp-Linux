@@ -1027,6 +1027,7 @@ static VkCommandPool ov_pool[FRAMES];
 static VkCommandBuffer ov_cb[FRAMES];
 static uint64_t ov_seq[FRAMES], ov_frame[FRAMES];  // the submission that executed the slot's buffer; the frame it was for
 static VkCommandBuffer ov_open;                    // (handed out by vk_overlay_begin, until vk_overlay_end)
+static VkCommandBuffer ov_last;                    // (vk_overlay_end) this frame's overlay, replayed on the generated frame
 static int ov_direct = -1;
 
 static bool ov_slot_ready(void) {  // (the slot's pool and buffer exist, and the buffer is free to record)
@@ -1092,6 +1093,22 @@ void vk_overlay_end(void *window_cmd, void *cmd) {
     rec_CmdExecuteCommands(cb, 1, &sec);
     cur_frame.secondary = true;
     ov_seq[slot] = vk_pending_seq();  // (the submission window_cmd goes in)
+    ov_last = sec;                    // (the generated frame draws it too; backend_present_now clears it each frame)
+}
+
+// The generated frame (frame generation) draws the game image but none of ImGui's overlay, so the FPS counter and the
+// menu would be missing every other presented frame (they flicker). This replays the overlay vk_overlay_end recorded
+// for the game's own frame, in a rendering of its own - the same thing vk_overlay_end leaves open for vk_frame_end.
+void vk_overlay_replay(VkCommandBuffer cb) {
+    if (!ov_last || !cur_frame.ok) return;
+    rec_CmdEndRendering(cb);
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[cur_frame.image],
+                                    .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                    .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
+                          .renderArea = {{0, 0}, g_vk.sc_extent}, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    rec_CmdBeginRendering(cb, &ri);
+    rec_CmdExecuteCommands(cb, 1, &ov_last);
 }
 
 static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
@@ -1569,6 +1586,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
+    ov_last = VK_NULL_HANDLE;  // (this frame's overlay, if any, is set by vk_overlay_end below)
     // the HD texture switch (F1 > Textures, applied while playing): between frames, on the thread that uploads the
     // textures (the render thread when it is on)
     extern void vk_hd_switch_frame(void);
@@ -1672,6 +1690,8 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             if (vk_frame_begin(black2)) {
                 VkCommandBuffer cb2 = vk_cmd();
                 vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);
+                extern void vk_overlay_replay(VkCommandBuffer cb);
+                vk_overlay_replay(cb2);  // (the FPS counter / menu the game's own frame drew, or they flicker)
                 vk_frame_end(NULL);
             }
         }
