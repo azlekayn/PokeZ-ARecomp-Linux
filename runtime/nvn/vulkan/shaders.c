@@ -353,6 +353,24 @@ static const char *builtin_src(const char *name, int *stage) {
                "  rx = (s & 0xF0u) == 0x30u ? u.react.x : s == 2u ? u.react.y : 0.0;\n"
                "}\n";
     }
+    // Frame generation (LARECOMP_FRAMEGEN; exec.c vk_fg_build): the frame between the last two, from their colour and
+    // the scene's motion vectors (fsr2_mv.frag above). A pixel at p now was at p + mv a frame ago, so the middle frame
+    // samples each side half way; where the motion vectors are ~0 (the HUD, menus, a cut) both samples are this frame,
+    // so nothing smears there.
+    if (!strcmp(name, "fg_interp.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D prev;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D cur;\n"
+               "layout(set = 0, binding = 2) uniform sampler2D mv;\n"
+               "layout(push_constant) uniform P { vec4 sz; } pc;\n"  // (1/w, 1/h, w, h)
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  vec2 uv = gl_FragCoord.xy * pc.sz.xy;\n"
+               "  vec2 m = texture(mv, uv).xy * pc.sz.xy;\n"
+               "  o = vec4(mix(texture(cur, uv - 0.5 * m).rgb, texture(prev, uv + 0.5 * m).rgb, 0.5), 1.0);\n"
+               "}\n";
+    }
     // ---- post passes before the present (Video tab "Anti-aliasing" / "Upscaler"): exec.c vk_present_draw.
     // Each draws a fullscreen triangle into an image the size of its output; push constants: two vec4.
     if (!strcmp(name, "post.vert")) {

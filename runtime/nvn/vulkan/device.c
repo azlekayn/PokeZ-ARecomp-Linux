@@ -1578,6 +1578,12 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     // Its GPU time is counted, and the window image's submission's from after its wait (exec.c gpu_timer_add)
     renderer_submit();
     pp_mark(PP_SUBMIT);
+    // frame generation (LARECOMP_FRAMEGEN; exec.c vk_fg_build): the frame between this and the last shown image, from
+    // the scene's motion vectors. Presented after the game's own frame below, so a game at 60 fps shows at 120.
+    extern void vk_fg_build(TexBackend *cur, uint64_t frame);
+    extern TexBackend *vk_fg_image;
+    extern uint64_t vk_fg_frame;
+    vk_fg_build(b, frame);
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);
@@ -1659,6 +1665,14 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         bool shot = win_shot && (long)frame + 1 == win_shot;
         vk_frame_end(shot ? "build/window.png" : NULL);
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) exit_after_shot();
+        if (vk_fg_image && vk_fg_frame == frame) {  // frame generation: the generated frame, after the game's own
+            static const float black2[4] = {0, 0, 0, 1};
+            if (vk_frame_begin(black2)) {
+                VkCommandBuffer cb2 = vk_cmd();
+                vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);
+                vk_frame_end(NULL);
+            }
+        }
     } else {
         renderer_submit();
     }
