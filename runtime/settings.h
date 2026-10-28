@@ -37,14 +37,23 @@ typedef struct {
     bool upscaler_auto;  // never chosen: the default for this GPU (settings_resolve_defaults); saved as "auto"
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     int sharpen;         // SHARPEN_*: sharpening of the image in the window (Vulkan)
+    bool taa;            // Pokémon Z-A: AMD FSR 2's temporal anti-aliasing in place of the game's own (vulkan/exec.c fsr2_copy)
     float volume;        // master volume, 1 = 100%
     bool reverb;         // room reverb effect
     bool movie_audio;
     bool show_fps;
     bool fps60;  // Pokémon Z-A: its frame clock at 1/60 s per frame (runtime/hle/framepace.c)
     bool aniso16;  // Texture filtering High: 16x anisotropic and trilinear on every mipmapped sampler (runtime/nvn/vulkan/textures.c)
+    bool hdr;            // HDR output when Windows has the display in HDR mode (vulkan/device.c, exec.c vk_hdr_encode)
+    int hdr_peak;        // HDR: the brightest highlights, nits
+    int hdr_paper;       // HDR: white in the HUD and menus, and the scene below its highlights, nits ("paper white")
     int opmode;     // the mode the game is told it runs in (runtime/services/am.c): 0 auto (handheld on a Steam Deck), 1 docked (1080p), 2 handheld (720p)
     bool game_drs;  // Pokémon Z-A: its own dynamic resolution (else always full: runtime/nvn/vulkan/exec.c)
+    int gtao;            // ambient occlusion (GTAO): 0 off, 1 low, 2 medium, 3 high (vulkan/exec.c)
+    int gtao_strength;   // its strength, percent (25-100; 100 the default look)
+    int ssgi;            // indirect light (screen-space GI): 0 off, 1 low, 2 medium, 3 high (vulkan/exec.c ssgi_apply)
+    int ssgi_strength;   // its strength, percent (50-300; 100 one physical bounce)
+    bool water_ssr;      // water reflections (vulkan/exec.c water_apply)
     bool tex_hd, tex_dump;  // HD texture packs (textures/hd) on; dump the game's textures (textures/dump): vulkan/textures.c
     int shadow_res;    // 1-4: shadow maps drawn at that many times the game's size, from the next start (vulkan/textures.c)
     int shadow_sharp;  // 1-4: the game's shadow filter that many times narrower, up to shadow_res (vulkan/exec.c)

@@ -35,6 +35,8 @@ Settings g_settings = {
     .tex_hd = true,
     .shadow_res = 1,
     .shadow_sharp = 1,
+    .gtao_strength = 100,
+    .ssgi_strength = 100,
     .inv_keys = true,
     .tracker = true,
     .tracker_filters = -1,
@@ -47,6 +49,8 @@ Settings g_settings = {
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
     .upscaler_auto = true,
     .res_auto = true,
+    .hdr_peak = 600,
+    .hdr_paper = 200,
     .livesplit_host = "localhost:16834",
 #ifndef __APPLE__
     .bg_input = true,  // (as before the setting; on macOS it needs Input Monitoring permission, so Off there)
@@ -169,12 +173,20 @@ void settings_load(void) {
         else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
         else if (!strcmp(key, "fps60")) g_settings.fps60 = atoi(val) != 0;
         else if (!strcmp(key, "fps60_lock")) g_settings.fps60_lock = atoi(val) != 0;
+        else if (!strcmp(key, "hdr")) g_settings.hdr = atoi(val) != 0;
+        else if (!strcmp(key, "hdr_peak_nits")) { int n = atoi(val); g_settings.hdr_peak = n < 200 ? 200 : n > 10000 ? 10000 : n; }
+        else if (!strcmp(key, "hdr_paper_white_nits")) { int n = atoi(val); g_settings.hdr_paper = n < 80 ? 80 : n > 500 ? 500 : n; }
         else if (!strcmp(key, "aniso16")) g_settings.aniso16 = atoi(val) != 0;
         else if (!strcmp(key, "operation_mode")) g_settings.opmode = !strcmp(val, "handheld") ? 2 : !strcmp(val, "docked") ? 1 : 0;
         else if (!strcmp(key, "dynamic_res")) g_settings.game_drs = !strcmp(val, "game");
         else if (!strcmp(key, "tex_hd")) g_settings.tex_hd = atoi(val) != 0;
         else if (!strcmp(key, "shadow_resolution")) { int v = atoi(val); g_settings.shadow_res = v < 1 ? 1 : v > 4 ? 4 : v; }
         else if (!strcmp(key, "shadow_sharpness")) { int v = atoi(val); g_settings.shadow_sharp = v < 1 ? 1 : v > 4 ? 4 : v; }
+        else if (!strcmp(key, "ambient_occlusion")) { int v = atoi(val); g_settings.gtao = v < 0 ? 0 : v > 3 ? 3 : v; }
+        else if (!strcmp(key, "ambient_occlusion_strength")) { int v = atoi(val); g_settings.gtao_strength = v < 25 ? 25 : v > 100 ? 100 : v; }
+        else if (!strcmp(key, "indirect_light")) { int v = atoi(val); g_settings.ssgi = v < 0 ? 0 : v > 3 ? 3 : v; }
+        else if (!strcmp(key, "indirect_light_strength")) { int v = atoi(val); g_settings.ssgi_strength = v < 50 ? 50 : v > 300 ? 300 : v; }
+        else if (!strcmp(key, "water_reflections")) g_settings.water_ssr = atoi(val) != 0;
         else if (!strcmp(key, "tex_dump")) g_settings.tex_dump = atoi(val) != 0;
         else if (!strcmp(key, "resolution")) {  // (auto: never chosen, the GPU's default)
             int n = atoi(val);
@@ -194,6 +206,7 @@ void settings_load(void) {
         else if (!strcmp(key, "sharpening")) {
             for (int i = 0; i < SHARPEN_N; i++) if (!strcmp(val, sharpen_names[i])) g_settings.sharpen = i;
         }
+        else if (!strcmp(key, "temporal_aa")) g_settings.taa = !strcmp(val, "fsr2");
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
         else if (!strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;
@@ -280,11 +293,19 @@ void settings_save(void) {
     fprintf(f, "fps60 = %d\n", g_settings.fps60);
     fprintf(f, "fps60_lock = %d\n", g_settings.fps60_lock);
     fprintf(f, "aniso16 = %d\n", g_settings.aniso16);
+    fprintf(f, "hdr = %d\n", g_settings.hdr);
+    fprintf(f, "hdr_peak_nits = %d\n", g_settings.hdr_peak);
+    fprintf(f, "hdr_paper_white_nits = %d\n", g_settings.hdr_paper);
     fprintf(f, "operation_mode = %s\n", g_settings.opmode == 2 ? "handheld" : g_settings.opmode == 1 ? "docked" : "auto");
     fprintf(f, "dynamic_res = %s\n", g_settings.game_drs ? "game" : "off");
     fprintf(f, "tex_hd = %d\n", g_settings.tex_hd);
     fprintf(f, "shadow_resolution = %d\n", g_settings.shadow_res);
     fprintf(f, "shadow_sharpness = %d\n", g_settings.shadow_sharp);
+    fprintf(f, "ambient_occlusion = %d\n", g_settings.gtao);
+    fprintf(f, "ambient_occlusion_strength = %d\n", g_settings.gtao_strength);
+    fprintf(f, "indirect_light = %d\n", g_settings.ssgi);
+    fprintf(f, "indirect_light_strength = %d\n", g_settings.ssgi_strength);
+    fprintf(f, "water_reflections = %d\n", g_settings.water_ssr);
     fprintf(f, "tex_dump = %d\n", g_settings.tex_dump);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");

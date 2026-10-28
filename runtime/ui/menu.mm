@@ -26,6 +26,7 @@ extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.c
 // the window image's commands, or that buffer itself after the recorder caught up), then handed back
 extern "C" void *vk_overlay_begin(void *window_cmd);
 extern "C" void vk_overlay_end(void *window_cmd, void *cmd);
+extern "C" int vk_hdr_state(void);  // device.c: 0 the display isn't in HDR mode, 1 it is, 2 HDR output on
 #endif
 
 extern "C" {
@@ -479,6 +480,38 @@ static void tab_display(void) {
                           "ângulos rasos, sem faixas visíveis onde o detalhe diminui. Do jogo: como no Switch.")))
             g_settings.aniso16 = tf == 1;
     }
+#ifndef __APPLE__
+    {   // HDR output (runtime/nvn/vulkan/device.c create_swapchain, exec.c vk_hdr_encode): applies at once
+        bool avail = vk_hdr_state() > 0;
+        opt_toggle(TR("HDR", "HDR"), &g_settings.hdr, false,
+                   avail ? TR("For HDR displays: the game's bright highlights - sky, sun, lights, neon - get brighter than "
+                              "white, up to the peak brightness below. The HUD and menus stay at the UI brightness.",
+                              "Para telas HDR: os pontos mais claros do jogo - céu, sol, luzes, neon - ficam mais claros que o "
+                              "branco, até o brilho máximo abaixo. O HUD e os menus ficam no brilho da interface.")
+                         : TR("Needs an HDR display with HDR turned on in Windows (Settings > System > Display > Use HDR).",
+                              "Precisa de uma tela HDR com o HDR ligado no Windows (Configurações > Sistema > Tela > Usar HDR)."));
+        if (g_settings.hdr) {
+            static const int peaks[] = {400, 600, 800, 1000, 1500}, papers[] = {100, 150, 200, 250, 300};
+            static const char *const peak_names[] = {"400 nits", "600 nits", "800 nits", "1000 nits", "1500 nits"};
+            static const char *const paper_names[] = {"100 nits", "150 nits", "200 nits", "250 nits", "300 nits"};
+            int pk = 0, pw = 0;
+            for (int i = 0; i < 5; i++) {
+                if (abs(peaks[i] - g_settings.hdr_peak) < abs(peaks[pk] - g_settings.hdr_peak)) pk = i;
+                if (abs(papers[i] - g_settings.hdr_paper) < abs(papers[pw] - g_settings.hdr_paper)) pw = i;
+            }
+            if (opt_choice(TR("HDR peak brightness", "Brilho máximo do HDR"), &pk, peak_names, 5, 1,
+                           TR("The brightest highlights. Set it to your display's peak (its HDR rating: DisplayHDR 600 = 600 "
+                              "nits) or a little below.",
+                              "Os pontos mais claros. Use o pico da sua tela (a classificação HDR: DisplayHDR 600 = 600 nits) "
+                              "ou um pouco menos.")))
+                g_settings.hdr_peak = peaks[pk];
+            if (opt_choice(TR("HDR UI brightness", "Brilho da interface no HDR"), &pw, paper_names, 5, 2,
+                           TR("White in the HUD and menus, and the rest of the picture below its highlights (\"paper white\").",
+                              "O branco do HUD e dos menus, e o resto da imagem abaixo dos pontos mais claros (\"branco de papel\").")))
+                g_settings.hdr_paper = papers[pw];
+        }
+    }
+#endif
     {   // Pokémon Z-A's dynamic resolution (runtime/nvn/vulkan/exec.c vk_counter_mode)
         extern bool g_za_frame_hook;
         if (g_za_frame_hook) {
@@ -619,6 +652,67 @@ static void tab_display(void) {
                       "Deixa a imagem na janela mais nítida (a nitidez adaptativa do AMD FSR 1), em qualquer resolução "
                       "interna. Auto: só depois da ampliação do upscaler, como antes. Desligada: nunca. Baixa / Média / "
                       "Alta: sempre, mais forte a cada passo."));
+    }
+#endif
+    {   // GTAO (vulkan/exec.c gtao_*): Pokémon Z-A has no ambient occlusion of its own
+        const char *ao[] = {TR("Off", "Desligado"), TR("Low", "Baixa"), TR("Medium", "Média"), TR("High", "Alta")};
+        opt_choice(TR("Ambient occlusion", "Oclusão ambiente"), &g_settings.gtao, ao, 4, 0,
+                   TR("Soft shadows where things meet: the base of walls and lamp posts, under bushes and characters, in "
+                      "corners (GTAO). Higher: smoother, at more GPU time (about 1-2 ms at 1.5x). Changes at once.",
+                      "Sombras suaves onde as coisas se encontram: a base de paredes e postes, sob arbustos e personagens, "
+                      "nos cantos (GTAO). Maior: mais suave, por mais tempo da GPU (cerca de 1-2 ms em 1.5x). Muda na hora."));
+        static const int pct[] = {25, 50, 75, 100};
+        const char *ps[] = {"25%", "50%", "75%", "100%"};
+        int pi = 3;
+        for (int i = 0; i < 4; i++) if (pct[i] == g_settings.gtao_strength) pi = i;
+        if (g_settings.gtao == 0) opt_disable_next();
+        if (opt_choice(TR("Ambient occlusion strength", "Intensidade da oclusão ambiente"), &pi, ps, 4, 3,
+                       TR("How dark those soft shadows get: 100% the default, lower for a subtler look. The same GPU time "
+                          "at any strength. Changes at once.",
+                          "O quão escuras essas sombras suaves ficam: 100% o padrão, menos para um visual mais sutil. O "
+                          "mesmo tempo da GPU em qualquer intensidade. Muda na hora.")))
+            g_settings.gtao_strength = pct[pi];
+    }
+    {   // indirect light (vulkan/exec.c ssgi_apply): one bounce of the game's light from what is on screen
+        const char *gi[] = {TR("Off", "Desligada"), TR("Low", "Baixa"), TR("Medium", "Média"), TR("High", "Alta")};
+        opt_choice(TR("Indirect light", "Luz indireta"), &g_settings.ssgi, gi, 4, 0,
+                   TR("Light bouncing off what is on screen (screen-space global illumination): sunlit ground and walls "
+                      "light up shaded corners, characters and walls nearby in their own colour. Strongest in shade and "
+                      "near colourful walls. Higher: smoother, at more GPU time (about 0.5 ms). Changes at once.",
+                      "Luz refletida pelo que está na tela (iluminação global em espaço de tela): chão e paredes ao sol "
+                      "iluminam cantos na sombra, personagens e paredes próximas com a sua cor. Mais forte na sombra e "
+                      "perto de paredes coloridas. Maior: mais suave, por mais tempo da GPU (cerca de 0,5 ms). Muda na hora."));
+        static const int gp[] = {50, 100, 150, 200, 300};
+        const char *gps[] = {"50%", "100%", "150%", "200%", "300%"};
+        int gpi = 1;
+        for (int i = 0; i < 5; i++) if (gp[i] == g_settings.ssgi_strength) gpi = i;
+        if (g_settings.ssgi == 0) opt_disable_next();
+        if (opt_choice(TR("Indirect light strength", "Intensidade da luz indireta"), &gpi, gps, 5, 1,
+                       TR("How much light bounces: 100% one physical bounce, more for a brighter, more colourful look. "
+                          "The same GPU time at any strength. Changes at once.",
+                          "Quanta luz é refletida: 100% um reflexo físico, mais para um visual mais claro e colorido. O "
+                          "mesmo tempo da GPU em qualquer intensidade. Muda na hora.")))
+            g_settings.ssgi_strength = gp[gpi];
+    }
+    opt_toggle(TR("Water reflections", "Reflexos na água"), &g_settings.water_ssr, false,  // (vulkan/exec.c water_apply)
+               TR("Fountains, ponds and the sea mirror the buildings, characters and sky around them, with gentle "
+                  "moving ripples; where the picture has nothing to mirror, the game's own sky reflection. Most visible "
+                  "at low angles. Changes at once.",
+                  "Fontes, lagos e o mar refletem os prédios, personagens e o céu ao redor, com ondulações suaves; onde "
+                  "a imagem não tem o que refletir, o reflexo do céu do próprio jogo. Mais visível em ângulos baixos. "
+                  "Muda na hora."));
+#ifndef __APPLE__
+    if (!la) {  // (runtime/nvn/vulkan/exec.c fsr2_copy: applies at once)
+        int t = g_settings.taa ? 1 : 0;
+        const char *taa[] = {TR("Game's", "Do jogo"), "AMD FSR 2"};
+        if (opt_choice(TR("Temporal anti-aliasing", "Anti-aliasing temporal"), &t, taa, 2, 0,
+                       TR("AMD FSR 2 in place of the game's own edge smoothing: it combines several frames, so fences, "
+                          "railings, leaves and thin lines stay smooth and stop flickering as you move. Uses a little GPU "
+                          "time. With it on, Anti-aliasing (SMAA) above isn't needed.",
+                          "AMD FSR 2 no lugar da suavização de bordas do próprio jogo: ele combina vários quadros, então "
+                          "grades, corrimões, folhas e linhas finas ficam lisos e param de tremular quando você anda. Usa um "
+                          "pouco da GPU. Com ele ligado, o Anti-aliasing (SMAA) acima não é necessário.")))
+            g_settings.taa = t == 1;
     }
 #endif
 
