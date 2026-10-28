@@ -5332,6 +5332,30 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             renderer_texture_scale(e->tex, &sc[0], &sc[1]);
             renderer_texture_fraction(e->tex, &fr[0], &fr[1]);
             wh[0] = e->tex->width; wh[1] = e->tex->height;
+            {   // A shadow map drawn bigger (textures.c tex_shadow_scale) still reports the game's size to the shaders'
+                // size queries, and Pokemon Z-A spreads its 16 filter taps by (1 / that size) x a radius: the same
+                // blur in the map's coordinates at any size. F1 > Shadow sharpness (shadow_sharpness in the ini;
+                // LARECOMP_SHADOW_SHARP=<s> overrides it), up to the map's own scale: the depth map's size queries
+                // report s times the game's size, so the taps sit s times closer - s times less blur, as many texels
+                // wide as at the game's size. Applies at once. Only the queries see it: the reads use normalized
+                // coordinates (uvs() takes the fraction, not this scale).
+                static int env_sharp = -2;
+                if (env_sharp == -2) { const char *v = ENV("LARECOMP_SHADOW_SHARP"); env_sharp = v ? atoi(v) : -1; }
+                int sharp = env_sharp >= 0 ? env_sharp : g_settings.shadow_sharp;
+                TexBackend *sb = sharp > 1 ? (TexBackend *)e->tex->backend : NULL;
+                if (sb && sb->shadow_k > 1 && (sb->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
+                    float d = sharp < sb->shadow_k ? (float)sharp : sb->shadow_k;
+                    sc[0] /= d; sc[1] /= d;
+                } else if (sb && sb->shadow_k > 1) {
+                    // The 8-bit object-id map drawn beside it (Z-A's self-shadowing guard: a tap on the same object at
+                    // about the same depth counts as lit) is read with texelFetch at trunc(its queried size x the
+                    // tap's uv): at the game's size that is the 4x4 block's centre, up to 2 texels from where the depth
+                    // tap is - with the taps narrowed (sharpness 3-4) the id no longer belongs to the depth's texel and
+                    // the guard fails along a character's inner edges (dark streaks across a shirt, a Pokémon's
+                    // belly). Its real size and no scale instead: the id is read at the depth tap's own texel.
+                    sc[0] = sc[1] = 1;
+                }
+            }
             for (int k = 0; k < nfeedback; k++)
                 if (e->tex == feedback_tex[k] && (st_->type == TEXTYPE_2D || st_->type == TEXTYPE_2D_ARRAY)) {
                     view = feedback_view[k];
