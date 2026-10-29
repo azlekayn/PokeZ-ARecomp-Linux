@@ -49,8 +49,44 @@ def _za_frame_dt(gen, a):
             f'  /* {a:#x}: ldr x8, [x1, #8] (frame duration -> world step, decoupled from the frame rate) */')
 
 
+# The frame clock's update loop hands each subsystem the frame's step: `mov w2, w20` (0xa0 after the config read).
+# In the game's 60 fps mode w20 is the configured 0 whatever the frame took, so the duration above never reaches it;
+# runtime/hle/framepace.c rt_za_frame_step hands on max(w20, the accumulator's step) instead, leaving the frame
+# clock's mode logic alone (LARECOMP_FRAME_STEP=0: w20). 2.0.2 only: the one build checked (1.0.0 / 2.0.0 likely
+# have it at the same offset, unverified - the assert would stop their builds).
+FRAME_STEP = {'b1f12fd919eae86a': ZA_BUILDS['b1f12fd919eae86a'] + 0xa0}  # 0x7001b29778
+
+
+def _za_frame_step(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x2a1403e2, hex(w)  # mov w2, w20
+    return ('{ extern uint32_t rt_za_frame_step(uint32_t); '
+            'c->x[2] = rt_za_frame_step((uint32_t)c->x[20]); }'
+            f'  /* {a:#x}: mov w2, w20 (the subsystems\' step -> the decoupled one, any frame mode) */')
+
+
+# DEV PROBE (not a feature): the named-work resolver (0x33df68) computes fnv1a64 of a name and resolves it. Log the
+# name (x1) and mode (x2) at its head for the Nemesis-system RE (ZA-NEMESIS-RE.md); runtime/hle/za_worklog.c gates it
+# behind LARECOMP_WORKLOG. Inert unless that env var is set, but it lives here, so it changes GAMELIB_ID (one dev
+# recompile). Remove it before a release. 2.0.2 only; other builds just don't patch.
+WORKLOG = {'b1f12fd919eae86a': 0x33df68}
+
+
+def _za_worklog(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x3946a008, hex(w)  # ldrb w8, [x0, #0x1a8] (resolver head)
+    return ('{ extern void rt_za_worklog_name(uint64_t, uint32_t); '
+            'rt_za_worklog_name(c->x[1], (uint32_t)c->x[2]); '
+            'c->x[8] = (uint64_t)LD8(c->x[0] + 0x1a8); }'
+            f'  /* {a:#x}: ldrb w8,[x0,#0x1a8] (+ named-work log) */')
+
+
 def za_patches(build):
     out = {ZA_BUILDS[build]: _za_frame_cfg}
     if build in FRAME_DT:
         out[FRAME_DT[build]] = _za_frame_dt
+    if build in FRAME_STEP:
+        out[FRAME_STEP[build]] = _za_frame_step
+    if build in WORKLOG:
+        out[WORKLOG[build]] = _za_worklog
     return out
