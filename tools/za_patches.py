@@ -20,6 +20,20 @@ def _za_frame_cfg(gen, a):
             f'  /* {a:#x}: ldrsb w20, [x9, #0x20] (frame mode) */')
 
 
+# The instruction right after it, `ldrb w9, [x9, #0x21]`, loads the flag the frame clock uses to choose between the
+# measured frame duration (its own step) and the configured one: `w22 = (flag == 0) ? configured : measured`, then the
+# world step is max(w22, configured). In its 60 fps mode the game leaves [x9+0x21] 0, so it takes `configured` = 0 and
+# steps exactly 1/60 s a frame - slow motion below 60 fps that the fixed-timestep accumulator in rt_za_frame_dt cannot
+# reach. Load 1 instead, so the flag picks `measured`: the world then tracks wall-clock time at any frame rate, without
+# changing the game's own byte (so its 30 fps mode stays its own decision). (The load also overwrites x9, the frame
+# clock pointer, which the code reloads a few instructions later.)
+def _za_frame_measured(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x39408529, hex(w)  # ldrb w9, [x9, #0x21]
+    return ('c->x[9] = 1;'
+            f'  /* {a:#x}: ldrb w9, [x9, #0x21] -> 1 (use the measured frame step) */')
+
+
 # The frame step's duration read (`ldr x8, [x1, #8]` at the function's head, 0x68 before the config read above). Its
 # result is the world step, an integer number of 1/60 s vsyncs; runtime/hle/framepace.c rt_za_frame_dt makes it track
 # wall-clock time instead of the frame rate (no slow motion between 60 and 30 fps).
@@ -39,4 +53,5 @@ def za_patches(build):
     out = {ZA_BUILDS[build]: _za_frame_cfg}
     if build in FRAME_DT:
         out[FRAME_DT[build]] = _za_frame_dt
+        out[ZA_BUILDS[build] + 4] = _za_frame_measured
     return out
