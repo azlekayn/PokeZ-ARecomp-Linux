@@ -3,6 +3,29 @@
 Repo (working dir): `/mnt/SSD Storage/Games/Ports/Switch/PokeZ-ARecomp-pokemon-za`
 Session date: 2026-10-28. Read this first in a new session.
 
+## CURRENT STATE — build #20 (2026-10-28)
+- Branch **`fg`**. AppImage `build/dist/LAS Recomp-v0.1.10-linux-x86_64.AppImage` = **build #20**.
+  Game code `extracted/lasgame.so.id = e0a36a7d6da5179b-B1F12FD919EAE86A`; everything since is runtime-only,
+  so **do not recompile** the game lib.
+- Done this session:
+  - **Build #19:** `framegen` / `fg_strength` / `fg_thresh` / `frame_dt` are now `larecomp.ini` + F1 settings
+    (env vars still override at load); `[fg]` spam gated behind `LARECOMP_FG_LOG=1`; added the
+    `LARECOMP_FOCUS_REBUILD=1` lever for the post-alt-tab sag.
+  - **Build #20:** the decouple (`rt_za_frame_dt`) was fed the game's CPU-busy time, so it did nothing — it now
+    accumulates real wall-clock and reports `owed - 1` (its "vsyncs - 1" convention). Verified with an A/B
+    screenshot. Frame generation no longer does a **blocking** second acquire/present (timeout 0, dropped if no
+    image) and goes **idle** when there are no motion vectors at the presented size (Dynamic res / not 1x).
+  - **Steam Deck bundle:** `build/dist/ZA-SteamDeck-linux-x86_64.zip` (6.15 GB,
+    sha256 `79cd92d34d8c4be332734985ec1fbdecd6a29b433509b56f3274adfe75424d2e`) — self-contained
+    (AppImage + `run.sh` + game files, no compile on the Deck).
+- **OPEN (verify):**
+  1. On the PC: does the build #20 frame_dt fix the below-60 "under water"? (main unverified item)
+  2. Frame gen at `resolution = 1x` + `dynamic_res = off` (the ini had `dynamic_res = game`).
+  3. `LARECOMP_FOCUS_REBUILD=1` for the post-alt-tab sag (lever added, untested).
+  4. Sideload the Deck zip and test.
+- Levers: `LARECOMP_FRAME_DT_LOG`, `LARECOMP_FRAME_DT_FORCE`, `LARECOMP_FG_LOG`, `LARECOMP_FOCUS_REBUILD`.
+  (See "Tests to run (build #20)" and "Build #20" below.)
+
 ## Environment
 - Fedora 44, Ryzen 7 7800X3D, **AMD RX 7800 XT (RADV, Mesa 26.2.4)**, 30 GB RAM.
 - Displays: DP-1 LG UltraGear **2560x1440 @ 165 Hz** (primary), HDMI Dell 1080p @ 60 Hz.
@@ -61,6 +84,9 @@ Implemented from scratch on top of #57's depth-derived motion vectors.
 - Verified here: `[fg] frame N: valid=1`, presents the generated frame, no errors.
 
 ## Slow motion / "decouple the world step from the frame rate" (in progress)
+> **SUPERSEDED by Build #20** (below). The analysis here is wrong on the key point: `[x1,#8]` is the game's
+> **CPU-busy** time (~8.5 ms at 60 fps), not its frame period, and the subsystems' step is `w20 + 1` vsyncs. The
+> accumulator built on that value therefore did nothing. See "Build #20" for the real bug and fix. Kept for history.
 - By design: the game advances its world **1/60 s per presented frame**; below 60 fps it slow-motions
   (~57 fps = 95 % speed). `fps60_lock=1` keeps 60 and accepts slow motion.
 - **Decompiled** the step function (2.0.2, `f_7001b29660`, via capstone on `extracted/exefs/main`):
@@ -113,6 +139,8 @@ swapchain / reset pacing on focus gain (the port's present-watch already does th
 
 
 ## UPDATED diagnosis (end of session)
+> **SUPERSEDED** — the heavy #57 options were already off in the 17:30 run (see "Dips: the heavy #57 options are
+> NOT the cause" below). The dip is a focus-transition / present-backpressure stall, not those effects.
 - FG off does NOT fully hold 60 either: the 17:25 FG-off run held a clean 60.0 for ~2.5 min, then dipped
   (`56.9 -> 31.5 (max 96 ms) -> 59.5`) around focus events (~t=149-177). So the dip is partly general, not only FG.
 - The user enabled the heavy #57 options: `ambient_occlusion=2`, `indirect_light=3`, `water_reflections=1`
@@ -122,6 +150,7 @@ swapchain / reset pacing on focus gain (the port's present-watch already does th
 - FG present count is 0 in FG-off logs; `[fg] valid=1` + "presenting the generated frame" confirm FG when on.
 
 ## PENDING / NEXT
+> **SUPERSEDED — see "Tests to run (build #20)" and "CURRENT STATE" above.** The list below is from build #16.
 1. ~~Rebuild the AppImage after the band fix~~ — **DONE (build #16 succeeded, 2026-10-28)**. The current
    `build/dist/LAS Recomp-v0.1.10-linux-x86_64.AppImage` includes the decoupling patch + band fix.
 2. User launches the AppImage → click **"Compile now"** once (generator changed).
@@ -210,3 +239,14 @@ swapchain / reset pacing on focus gain (the port's present-watch already does th
    `[fg] ... valid=1` and `presenting the generated frame`. With Dynamic on, expect the one-time
    `[fg] no motion vectors ... frame generation is idle` instead.
 3. Alt-tab (with `LARECOMP_FOCUS_REBUILD=1` if the post-refocus sag remains).
+
+## Steam Deck bundle (build #20)
+- The Deck is x86-64, so it uses the same AppImage (glibc 2.35 need; SteamOS 3.x is newer; AVX2/BMI2 = x86-64-v3:
+  Zen 2 has it). `settings_on_steam_deck()`/`am_handheld()` auto-pick handheld 720p.
+- **`zaimport` is Windows-only**, so the Deck's start screen cannot import NSPs: the bundle ships the already
+  extracted game files (`extracted/` incl. `lasgame.so`, so no "Compile now") in a self-contained data root.
+- Bundle: `build/dist/ZA-SteamDeck-linux-x86_64.zip` (unzip -> `ZA-SteamDeck/{run.sh, README.txt,
+  LAS Recomp-...AppImage, data/{extracted,cache,mods,save,larecomp.ini}}`). `run.sh` sets
+  `LARECOMP_DATA_ROOT`/`LARECOMP_SETTINGS` to the bundle's `data/`, the RADV fix, and
+  `APPIMAGE_EXTRACT_AND_RUN=1` when there is no `/dev/fuse`. `data/larecomp.ini` is Deck-tuned
+  (`operation_mode=auto`, `fps60=0`, `frame_dt=1`, `framegen=0`, effects off).
