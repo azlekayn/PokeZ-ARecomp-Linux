@@ -3635,9 +3635,14 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         rs_log(e, "in place -> copy (changed later)", cs_slot, f);
         break;
     case RS_PROBE:  // the use after the probe: did the CPU touch the original meanwhile?
-        if (h == e->hash) { e->mode = RS_PLACE; e->copy = e->pristine = 0; rs_log(e, "probe -> in place (unchanged)", cs_slot, f); return addr; }
+        // Without the write watch (no page write tracking: a userptr / dma-buf heap, amdgpu) the hash probe can't see
+        // the game rewriting a range with the SAME bytes while the GPU reads it in place - the race that lost the
+        // device (an indirect draw's instance count read as a float, 0x42480000). So with no watch, keep copying: safe,
+        // one copy a frame (these ranges are small - light / exposure / tile lists). With the watch (page tracking that
+        // works) the probe -> in place as before.
+        if (h == e->hash && watch_on()) { e->mode = RS_PLACE; e->copy = e->pristine = 0; rs_log(e, "probe -> in place (unchanged)", cs_slot, f); return addr; }
         e->mode = RS_COPY;
-        rs_log(e, "probe -> copy (the CPU rewrote it)", cs_slot, f);
+        rs_log(e, h == e->hash ? "probe -> copy (no write watch: a copy every frame)" : "probe -> copy (the CPU rewrote it)", cs_slot, f);
         break;
     default:  // RS_COPY
         if (h == e->hash && e->copy) return e->copy;  // unchanged: the copy (maybe GPU-written: its state) is current
