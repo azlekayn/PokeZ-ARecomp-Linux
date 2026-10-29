@@ -9585,3 +9585,6 @@ void backend_texture_read(NvnTexture *t, const void *view, const int32_t region[
     copy_texture_to_buffer(&ref, (uint64_t)(uintptr_t)data);
     st.copy_row_stride = row, st.copy_image_stride = img;
 }
+
+// The [mem] line's counts (device.c): what grows over a long session shows next to the process size (#70).
+void vk_exec_counts(uint32_t *progs, uint32_t *pipes) { *progs = prog_kv.n; *pipes = pipe_kv.n; }
