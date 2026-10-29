@@ -475,24 +475,6 @@ static void tab_display(void) {
                           "O mundo roda na mesma velocidade em qualquer taxa de quadros: o passo do jogo vem de um "
                           "acumulador de passo fixo, então 57 fps joga a 57 fps de jogo, não 95%. Desligado: o passo do "
                           "próprio jogo - abaixo de 60 fps tudo fica em câmera lenta (como no Switch)."));
-            // Pokémon Z-A: the night Z-A Royale trainers change every load (runtime/hle/royale_random.c). Runtime-only:
-            // no game recompile. Off: the game's fixed table - or, if one is installed, a mod's trdata_array.bin.
-            opt_toggle(TR("Z-A Royale randomizer", "Aleatorizador da Royale Z-A"), &g_settings.za_royale_random, false,
-                       TR("Every night the Z-A Royale's Battle Zone trainers are rolled again as they load: random "
-                          "species and natures, levels within a range of each trainer's own, so each night differs. "
-                          "Trainer names and appearances are kept, and the rest of the game's trainers are untouched. "
-                          "Has no effect while a mod replaces the trainer table.",
-                          "Toda noite os treinadores da Zona de Batalha da Royale Z-A são sorteados de novo ao carregar: "
-                          "espécies e naturezas aleatórias, níveis dentro de uma faixa do próprio treinador, então cada "
-                          "noite é diferente. Nomes e aparências são mantidos, e os demais treinadores do jogo não mudam. "
-                          "Não tem efeito enquanto um mod substitui a tabela de treinadores."));
-            if (g_settings.za_royale_random) {
-                float d = (float)g_settings.za_royale_delta;
-                if (opt_slider(TR("Royale level range", "Faixa de nível da Royale"), &d, 0, 20, 1, 5, "+/-%g",
-                               TR("How far a rolled Pokemon's level may stray from that trainer's own level.",
-                                  "O quanto o nível de um Pokémon sorteado pode variar do nível do próprio treinador.")))
-                    g_settings.za_royale_delta = (int)d;
-            }
         }
     }
     {   // (runtime/nvn/vulkan/textures.c vk_sampler_settings: every sampler made again, at once)
@@ -899,6 +881,32 @@ static void tab_audio(void) {
     opt_end();
 }
 
+// Mods: ZA Recomp's own changes to the game's content (Pokémon Z-A only: its tab set). Mods from elsewhere go in the
+// mods/ folder, from the start screen's Mods.
+static void tab_mods(void) {
+    opt_begin("##mods", ImGui::GetFontSize() / 34);
+    opt_section(TR("Z-A Royale", "Royale Z-A"));
+    // the night Z-A Royale trainers change every load (runtime/hle/royale_random.c). Runtime-only: no game
+    // recompile. Off: the game's fixed table - or, if one is installed, a mod's trdata_array.bin.
+    opt_toggle(TR("Z-A Royale randomizer", "Aleatorizador da Royale Z-A"), &g_settings.za_royale_random, false,
+               TR("Every night the Z-A Royale's Battle Zone trainers are rolled again as they load: random "
+                  "species and natures, levels within a range of each trainer's own, so each night differs. "
+                  "Trainer names and appearances are kept, and the rest of the game's trainers are untouched. "
+                  "Has no effect while a mod replaces the trainer table.",
+                  "Toda noite os treinadores da Zona de Batalha da Royale Z-A são sorteados de novo ao carregar: "
+                  "espécies e naturezas aleatórias, níveis dentro de uma faixa do próprio treinador, então cada "
+                  "noite é diferente. Nomes e aparências são mantidos, e os demais treinadores do jogo não mudam. "
+                  "Não tem efeito enquanto um mod substitui a tabela de treinadores."));
+    if (g_settings.za_royale_random) {
+        float d = (float)g_settings.za_royale_delta;
+        if (opt_slider(TR("Royale level range", "Faixa de nível da Royale"), &d, 0, 20, 1, 5, "+/-%g",
+                       TR("How far a rolled Pokemon's level may stray from that trainer's own level.",
+                          "O quanto o nível de um Pokémon sorteado pode variar do nível do próprio treinador.")))
+            g_settings.za_royale_delta = (int)d;
+    }
+    opt_end();
+}
+
 // Quit: back to the start screen (in game: the game reboots to it) or out to the desktop. Each asks first (progress
 // since the last save is lost); B / Esc or Cancel backs out.
 extern "C" void rt_request_reboot(int kind);  // runtime/main.c (RT_REBOOT_TITLE = 2: the start screen)
@@ -1125,15 +1133,15 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     struct Tab { const char *name; int id; bool on; };
     Tab tabs[12];
     int ntabs = 0;
-    // Pokémon Z-A (ZA Recomp's start screen, or the game loaded): Controls, Video, Audio, Game, Quit. Link's Awakening
-    // keeps its own set (randomizer, cheats, warp, save editor...). (ids stay: test hooks)
+    // Pokémon Z-A (ZA Recomp's start screen, or the game loaded): Controls, Video, Audio, Game, Mods, Quit. Link's
+    // Awakening keeps its own set (randomizer, cheats, warp, save editor...). (ids stay: test hooks)
     menu_la_tabs = in_game && g_game_is_la;
     if (prelaunch) tabs[ntabs++] = {TR("Files", "Arquivos"), -1, true};
     if (!menu_la_tabs) {
         const char *names[] = {TR("Controls", "Controles"), TR("Video", "Vídeo"), TR("Audio", "Áudio"), TR("Game", "Jogo"),
-                               TR("Quit", "Sair")};
-        static const int ids[] = {8, 0, 1, 10, 9};
-        for (int i = 0; i < 5; i++)
+                               TR("Mods", "Mods"), TR("Quit", "Sair")};
+        static const int ids[] = {8, 0, 1, 10, 11, 9};
+        for (int i = 0; i < 6; i++)
             if (ids[i] != 9 || !prelaunch) tabs[ntabs++] = {names[i], ids[i], true};
     } else {
         static const char *names[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Gameplay",
@@ -1258,6 +1266,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 case 8: controls_tab_draw(scale); break;
                 case 9: tab_quit(scale, in_game); break;
                 case 10: tab_game(); break;
+                case 11: tab_mods(); break;
                 }
                 static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
                 if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));
