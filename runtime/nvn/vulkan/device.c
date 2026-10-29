@@ -1751,10 +1751,14 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             {
                 extern int g_out_present_interval;  // (objects.c present_pace: the game's present interval)
                 int iv = g_out_present_interval >= 1 && g_out_present_interval <= 4 ? g_out_present_interval : 1;
-                static uint64_t gap = ~0ull;
-                if (gap == ~0ull) { const char *e = getenv("LARECOMP_FG_MID"); gap = e ? strtoull(e, NULL, 10) : 0; }
-                uint64_t half = gap ? gap : 16666667ull * (uint64_t)iv / 2;
-                plat_sleep_until_ns(plat_now_ns() + half);
+                // Off by default: the spacing needs ~half a game frame of headroom, and the render thread hasn't got
+                // it here (~24 ms of work in the Deck's 33 ms frame - the same cost that caps the uncapped rate at
+                // ~44), so sleeping this thread cost 30 -> 25 fps. On a machine with room: LARECOMP_FG_MID=half (half
+                // a game frame) or =<ns>. The generated frame then lands on the refresh between two game frames.
+                static long mid = -2;  // (-2: unset, -1: off, -3: half a game frame)
+                if (mid == -2) { const char *e = getenv("LARECOMP_FG_MID"); mid = e ? (!strcmp(e, "half") ? -3 : atol(e)) : -1; }
+                uint64_t gap = mid == -3 ? 16666667ull * (uint64_t)iv / 2 : mid > 0 ? (uint64_t)mid : 0;
+                if (gap) plat_sleep_until_ns(plat_now_ns() + gap);
             }
             if (vk_frame_begin_to(black2, 0)) {  // (best effort: no free window image now -> drop the generated frame)
                 VkCommandBuffer cb2 = vk_cmd();
