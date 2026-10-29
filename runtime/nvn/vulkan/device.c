@@ -2171,6 +2171,25 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         extern void renderer_set_alloc_scale(float ax, float ay);
         renderer_set_alloc_scale((float)os.ax, (float)os.ay);
         renderer_set_scale((float)sx, (float)sy);
+        {   // the UI scale (textures.c g_ui_x): the game's window textures at the window's resolution - their picture (the
+            // game's crop of them: handheld 720 of 1080 lines) as many lines as it is shown on, the shape as the scene's;
+            // never under the scene's scale. LARECOMP_UI_NATIVE=0: as the scene.
+            extern void renderer_set_ui_scale(float ux, float uy);
+            extern int g_present_crop[4], g_present_tex[2];
+            static int on = -1;
+            if (on < 0) on = !ENV("LARECOMP_UI_NATIVE") || atoi(ENV("LARECOMP_UI_NATIVE"));
+            double pic = g_present_crop[3] > 0 ? g_present_crop[3] : g_present_tex[1] > 0 ? g_present_tex[1] : 1080;
+            double uy = on && vh > 0 ? vh / pic : 0, ux = uy * (sy > 0 ? sx / sy : 1);
+            if (uy < sy * 1.01 || uy > 4) uy = ux = 0;  // (the scene's scale already, or more than the GPU would like)
+            static double lu = -1;
+            if (fabs(uy - lu) > 1e-4) {
+                lu = uy;
+                if (uy > 0) LOG("[scale] UI (the game's window textures, its HUD) at %.3fx%.3f: a %.0f-line picture, %.0f lines shown "
+                                "(the scene at %.3f)\n", ux, uy, pic * uy, vh, sy);
+                else LOG("[scale] UI at the scene's scale\n");
+            }
+            renderer_set_ui_scale((float)ux, (float)uy);
+        }
         extern void vk_sampler_settings(double lines);
         vk_sampler_settings(os.lines);  // (the mip bias of a frame drawn smaller than shown; F1's texture filtering)
         pp_mark(PP_SCALE);

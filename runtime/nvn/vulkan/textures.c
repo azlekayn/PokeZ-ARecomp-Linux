@@ -193,6 +193,16 @@ static float g_al_x = 1, g_al_y = 1;   // the allocation scale: the size of scal
 void renderer_get_scale(float *sx, float *sy) { *sx = g_rs_x; *sy = g_rs_y; }
 void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
 void renderer_set_alloc_scale(float ax, float ay) { g_al_x = ax; g_al_y = ay; }
+// The UI scale: the game's window textures - its 3D scene copied in, the HUD drawn over it, then shown - at the
+// window's resolution while the scene's own targets stay at the render scale. On a Steam Deck the scene is drawn at
+// 854x480 (handheld 1x on an integrated GPU) and the HUD was too: blurry text and icons, scaled up to the 1280x800
+// screen. Every draw already goes by its target's own scale (viewport, scissor, gl_FragCoord, the sampled textures'
+// rows: exec.c rscale), and the passes into the window textures bind nothing else (one colour target, no depth:
+// LARECOMP_VK_LOG_PRESENT_PASSES on the Deck). 0: as the rest (device.c sets it each frame; LARECOMP_UI_NATIVE=0).
+// Not with Dynamic resolution's steps: the UI's allocation is its scale.
+static float g_ui_x, g_ui_y;
+void renderer_set_ui_scale(float ux, float uy) { g_ui_x = ux; g_ui_y = uy; }
+static bool tex_ui(const TexBackend *b) { return b->ui && g_ui_x > 0; }
 // The part of a scalable texture its contents occupy (Dynamic: the render scale over the allocation scale; 1 otherwise).
 void renderer_texture_fraction(NvnTexture *t, float *fx, float *fy) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
@@ -359,10 +369,10 @@ VkFormat vk_view_format(TexBackend *b, VkFormat want) {
 
 static void create_image(NvnTexture *t, TexBackend *b) {
     VkFmt mf = fmt_of(t->format);
-    b->ax = b->scalable ? g_al_x : 1;
-    b->ay = b->scalable ? g_al_y : 1;
-    b->sx = b->scalable ? g_rs_x : 1;
-    b->sy = b->scalable ? g_rs_y : 1;
+    b->ax = tex_ui(b) ? g_ui_x : b->scalable ? g_al_x : 1;
+    b->ay = tex_ui(b) ? g_ui_y : b->scalable ? g_al_y : 1;
+    b->sx = tex_ui(b) ? g_ui_x : b->scalable ? g_rs_x : 1;
+    b->sy = tex_ui(b) ? g_ui_y : b->scalable ? g_rs_y : 1;
     uint32_t tw = t->width ? t->width : 1, th = t->height ? t->height : 1;
     if (b->scalable) {
         tw = (uint32_t)lroundf(tw * b->ax); th = (uint32_t)lroundf(th * b->ay);
@@ -562,7 +572,8 @@ int vk_textures_live(void) { return g_nlive; }
 static TexBackend *tex_backend(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
-        if (b->scalable && (b->ax != g_al_x || b->ay != g_al_y)) {  // output resolution changed: reallocate
+        float wx = tex_ui(b) ? g_ui_x : g_al_x, wy = tex_ui(b) ? g_ui_y : g_al_y;
+        if (b->scalable && (b->ax != wx || b->ay != wy)) {  // output resolution (or the UI scale) changed: reallocate
             destroy_image(b);
             create_image(t, b);
         }
@@ -571,6 +582,7 @@ static TexBackend *tex_backend(NvnTexture *t) {
     vk_collect_dead();
     b = calloc(1, sizeof *b);
     b->scalable = tex_scalable(t);
+    b->ui = b->scalable && t->window && !(getenv("LARECOMP_UI_NATIVE") && !atoi(getenv("LARECOMP_UI_NATIVE")));
     b->shadow_k = tex_shadow_scale(t);
     create_image(t, b);
     t->backend = b;
@@ -1209,7 +1221,8 @@ void backend_prefetch_texture(NvnTexture *t) {
 void renderer_mark_gpu_owned(NvnTexture *t) {
     TexBackend *b = tex_backend(t);
     b->gpu_owned = true;
-    if (b->scalable) { b->sx = g_rs_x; b->sy = g_rs_y; }
+    if (tex_ui(b)) { b->sx = g_ui_x; b->sy = g_ui_y; }
+    else if (b->scalable) { b->sx = g_rs_x; b->sy = g_rs_y; }
 }
 bool renderer_is_gpu_owned(NvnTexture *t) { return tex_backend(t)->gpu_owned; }
 void backend_pool_written(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
