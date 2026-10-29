@@ -145,6 +145,12 @@ static uint64_t ov_meta_off, ov_meta_size, ov_end;
 typedef struct { uint64_t off, size; char *path; uint32_t meta; } RomFile;
 static RomFile *rom_files;
 static int rom_nfiles;
+// Pokémon Z-A: the Z-A Royale randomizer's rolled table (runtime/hle/royale_random.c), served in place of the game's
+// world/ik_data/trainer/trdata/trdata_array.bin - re-rolled each load (a read from the file's first byte).
+static uint8_t *za_tr_buf;
+static uint64_t za_tr_off, za_tr_size;
+static int za_tr_looked;  // 0 not looked, 1 found, 2 no such file (a different game)
+static pthread_mutex_t za_tr_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t rom_data_off;
 
 // A seed replaces ~850 files and adds more: each is opened when it's read and kept in a small cache like the base
@@ -211,6 +217,8 @@ RT_ON_RESET(fs_reset) {
     ov_meta = NULL, ov_meta_off = ov_meta_size = ov_end = 0;
     npatches = 0;
     rom_files = NULL, rom_nfiles = 0, rom_data_off = 0;
+    free(za_tr_buf);
+    za_tr_buf = NULL, za_tr_off = 0, za_tr_size = 0, za_tr_looked = 0;
     base_close();
     mounts_reset();  // (the old boot's mounts are gone with it)
     g_save_dir = "save";
@@ -681,8 +689,48 @@ static void rom_index(void) {
     LOG("[fs] romfs index: %d files\n", rom_nfiles);
 }
 
+// Pokémon Z-A: the Z-A Royale randomizer (runtime/hle/royale_random.c). While it's on, a read of the trainer table is
+// served from a re-rolled copy of the game's file instead (rolled again on each load - a read from its first byte),
+// so the night Battle Zone trainers differ every night. false: not that file / off (the normal path serves it). A mod
+// that replaces trdata_array.bin takes over instead (the game reads the overlay, past this file's range).
+extern int za_royale_random_on(void);
+extern void za_royale_random_roll(uint8_t *buf, size_t size);
+static bool za_royale_read(uint8_t *dst, uint64_t size, uint64_t off) {
+    if (!za_royale_random_on()) return false;
+    pthread_mutex_lock(&za_tr_lock);
+    if (!za_tr_looked) {
+        za_tr_looked = 2;
+        for (int i = 0; i < rom_nfiles; i++)
+            if (!strcmp(rom_files[i].path, "world/ik_data/trainer/trdata/trdata_array.bin")) {
+                za_tr_off = rom_files[i].off, za_tr_size = rom_files[i].size, za_tr_looked = 1;
+                break;
+            }
+    }
+    if (za_tr_looked != 1 || off < za_tr_off || off >= za_tr_off + za_tr_size) {
+        pthread_mutex_unlock(&za_tr_lock);
+        return false;
+    }
+    uint64_t in = off - za_tr_off;
+    if (in == 0 || !za_tr_buf) {  // a load reads from the file's first byte: roll this load's table
+        uint8_t *nb = realloc(za_tr_buf, za_tr_size);
+        if (nb) {
+            za_tr_buf = nb;
+            if (base_pread(za_tr_buf, za_tr_size, za_tr_off) == (ssize_t)za_tr_size) za_royale_random_roll(za_tr_buf, za_tr_size);
+            else free(za_tr_buf), za_tr_buf = NULL;
+        }
+        if (!za_tr_buf) { pthread_mutex_unlock(&za_tr_lock); return false; }
+    }
+    uint64_t avail = in < za_tr_size ? za_tr_size - in : 0;
+    uint64_t n = size < avail ? size : avail;
+    memcpy(dst, za_tr_buf + in, n);
+    if (n < size) memset(dst + n, 0, size - n);
+    pthread_mutex_unlock(&za_tr_lock);
+    return true;
+}
+
 // Virtual RomFS image read: original bytes, with the patched file table and appended replacement files.
 static ssize_t romfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
+    if (za_royale_read(dst, size, off)) return (ssize_t)size;
     if (!ov_n && !npatches) return base_pread(dst, size, off);
     uint64_t done = 0;
     while (done < size) {
