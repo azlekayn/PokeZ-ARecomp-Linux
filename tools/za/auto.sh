@@ -12,7 +12,7 @@ sleep 40; last=""; stuck=0
 while kill -0 $G 2>/dev/null; do
     cur=$(grep -a "^\[vk\] t=" $S/auto.log | tail -1 | cut -c1-30)
     if [ "$cur" = "$last" ]; then stuck=$((stuck+5)); else stuck=0; last="$cur"; fi
-    if [ $stuck -ge 25 ]; then echo "HANG em: $cur"; kill -INT $(pgrep -x lasrecomp); sleep 15; break; fi
+    if [ $stuck -ge 25 ]; then echo "HANG em: $cur"; kill -INT $(pgrep -x pokemon-za || pgrep -x lasrecomp); sleep 15; break; fi
     sleep 5
 done
 wait $G 2>/dev/null
