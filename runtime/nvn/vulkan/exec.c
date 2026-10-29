@@ -115,6 +115,7 @@ static int passes_in_sub;  // render passes in the submission being recorded (LA
 // LARECOMP_GPU_OVERLAP=0: off (the wait on the fence's own submission, as before); =1: on.
 #define VK_OVERLAP_DEFAULT 1  // on where the write watch can run (overlap_on: off by itself without page write tracking)
 static uint64_t deferred_seq[2];  // (seq_lock) the latest two fences the game waited on, newest first (overlap_defer)
+extern bool g_vk_submit_untimed;  // (renderer_submit, below)
 static uint64_t present_seq[2];   // (seq_lock) the game's latest two presents' submissions, newest first: frames' ends
 static uint64_t stat_deferred;  // SyncWaits returned without waiting (stats)
 static uint64_t stat_snap_bytes, stat_snap_copies;  // storage copies made (snap_storage; stats, per period)
@@ -566,7 +567,8 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
         cbs[n++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->upload};
     }
     vk_cmd();  // (an empty main buffer still carries the semaphores)
-    s->ts_skip = wait != VK_NULL_HANDLE;
+    s->ts_skip = wait != VK_NULL_HANDLE || g_vk_submit_untimed;
+    g_vk_submit_untimed = false;
     if (s->ts_win && !s->ts_skip) s->ts_win = false;  // (not the window image's after all: counted as game work)
     if (s->ts) rec_CmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, prof_qp, (uint32_t)cur_sub * 3 + 1);
     rec_EndCommandBuffer(s->main);
@@ -595,6 +597,9 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     if (signal) gc_frame();  // (a present: once a frame)
 }
 
+// (device.c fgq) The next submission is not the game's GPU work - frame generation's frame, drawn into its own image:
+// left out of the GPU time (dynamic resolution's budget) and the frame span, as the window image's own work is
+bool g_vk_submit_untimed;
 void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
 
 // (overlap_defer) The game's frame was just presented (device.c, at the end of its present item - after frame
@@ -8821,7 +8826,14 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
         rec_CmdSetScissor(cb, 0, 1, &sc);
         // (F1 > Video > Rendering: Frame generation strength / threshold; read live from the settings.)
         float thresh = g_settings.fg_thresh, strength = g_settings.fg_strength;
-        float pc[8] = {1.0f / (float)w, 1.0f / (float)h, (float)w, (float)h, thresh, strength, 0, 0};
+        static int mode_mid = -1;  // (LARECOMP_FG_MODE=interp: the frame between the last two, as before - fg_interp.frag)
+        if (mode_mid < 0) { const char *e = ENV("LARECOMP_FG_MODE"); mode_mid = e && !strcmp(e, "interp"); }
+        // (debug) LARECOMP_FG_DUMP=<frame>: that frame's game image and generated frame, and the next frame's motion
+        // (drawn in place of its generated frame: fg_interp.frag par.w) -> build/fg_{cur,gen,mv}.png
+        static long dump = -2;
+        if (dump == -2) dump = ENV("LARECOMP_FG_DUMP") ? atol(ENV("LARECOMP_FG_DUMP")) : -1;
+        float pc[8] = {1.0f / (float)w, 1.0f / (float)h, (float)w, (float)h, thresh, strength, mode_mid ? 1.0f : 0.0f,
+                       dump >= 0 && frame == (uint64_t)dump + 1 ? 1.0f : 0.0f};
         rec_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
         fullscreen_vertex_bind(cb);
         rec_CmdDraw(cb, 3, 1, 0, 0);
@@ -8829,6 +8841,14 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
         vk_full_barrier(cb);
         vk_fg_image = &interp;
         vk_fg_frame = frame;
+        if (dump >= 0 && frame == (uint64_t)dump) {
+            renderer_save_texture_tex(cur, "build/fg_cur.png");
+            renderer_save_texture_tex(&interp, "build/fg_gen.png");
+            LOG("[fg] dump: frame %llu -> build/fg_cur.png, build/fg_gen.png (the motion next frame: build/fg_mv.png)\n",
+                (unsigned long long)frame);
+        } else if (dump >= 0 && frame == (uint64_t)dump + 1)
+            renderer_save_texture_tex(&interp, "build/fg_mv.png");
+        cb = vk_cmd();  // (the saves may have ended the pass and moved on in the command buffer)
     }
     fg_copy(cb, cur->image, prev.image, w, h);
     prev_frame = frame;
