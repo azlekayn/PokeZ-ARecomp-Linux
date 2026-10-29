@@ -53,5 +53,4 @@ def za_patches(build):
     out = {ZA_BUILDS[build]: _za_frame_cfg}
     if build in FRAME_DT:
         out[FRAME_DT[build]] = _za_frame_dt
-        out[ZA_BUILDS[build] + 4] = _za_frame_measured
     return out
