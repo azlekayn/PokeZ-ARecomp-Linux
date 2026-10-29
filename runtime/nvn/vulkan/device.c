@@ -907,8 +907,11 @@ typedef struct { uint32_t image; VkSemaphore acquired; bool ok, secondary, based
 static Frame cur_frame;
 
 // Acquire the next window image and begin rendering into it (cleared to `clear`). Returns false when there is
-// nothing to draw into (minimised window).
-bool vk_frame_begin(const float clear[4]) {
+// nothing to draw into (minimised window). timeout: how long to wait for a free window image - the game's own frames
+// wait forever (UINT64_MAX), the generated frame uses 0 (see backend_present_now): if no image is free right now the
+// generated frame is dropped rather than stalling the render thread (a compositor that can't take two presents a
+// refresh made frame generation 60 -> ~45 fps: acquire blocks for the third/fourth image).
+static bool vk_frame_begin_to(const float clear[4], uint64_t timeout) {
     cur_frame.ok = false;
     if (rq_stopping()) return false;  // quitting: no window image after the window closed (#40)
     int w, h;
@@ -938,12 +941,13 @@ bool vk_frame_begin(const float clear[4]) {
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
     WAITING_AT(0, vk_wait_seq(slot_seq[slot]));
     VkResult r;
-    WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image));
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+    WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, timeout, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image));
+    if (timeout && r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
-        WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE,
+        WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, timeout, acquire_sem[slot], VK_NULL_HANDLE,
                                           &cur_frame.image));
     }
+    if (r == VK_TIMEOUT || r == VK_NOT_READY) return false;  // (best-effort caller: no free window image right now)
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("[vk] acquire failed: %d\n", r); return false; }
     cur_frame.acquired = acquire_sem[slot];
     cur_frame.id++;
@@ -966,6 +970,9 @@ bool vk_frame_begin(const float clear[4]) {
     cur_frame.ok = true;
     return true;
 }
+
+// The game's own frame: wait for a window image however long it takes.
+bool vk_frame_begin(const float clear[4]) { return vk_frame_begin_to(clear, UINT64_MAX); }
 
 // Passes of their own between vk_frame_begin and vk_frame_end (exec.c post passes): end the window image's
 // rendering, and begin it again keeping what was drawn.
@@ -1698,12 +1705,12 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             static const float black2[4] = {0, 0, 0, 1};
             static uint64_t nfg;
             static int fglog = -1;
-            if (fglog < 0) fglog = getenv("LARECOMP_FG_LOG") != NULL;  // (off: not per-frame log spam)
-            if (fglog && (nfg < 6 || frame % 300 == 0)) {
+            if (fglog < 0) fglog = getenv("LARECOMP_FG_LOG") != NULL;
+            if (nfg < 6 || (fglog && frame % 300 == 0)) {
                 nfg++;
                 LOG("[fg] presenting the generated frame %llu\n", (unsigned long long)frame);
             }
-            if (vk_frame_begin(black2)) {
+            if (vk_frame_begin_to(black2, 0)) {  // (best effort: no free window image now -> drop the generated frame)
                 VkCommandBuffer cb2 = vk_cmd();
                 vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);
                 extern void vk_overlay_replay(VkCommandBuffer cb);

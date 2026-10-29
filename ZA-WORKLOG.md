@@ -166,3 +166,47 @@ swapchain / reset pacing on focus gain (the port's present-watch already does th
 3. FG **on** (`framegen=1` in F1 or `LARECOMP_FRAMEGEN=1`), alt-tab → does build #18's "present once while unfocused"
    hold 60? (`LARECOMP_FG_LOG=1` shows `[fg] presenting the generated frame` again.)
 4. FG on, check the F1 rows (strength / threshold) change the picture live.
+
+## Build #20 — the decouple's real bug, and FG's pure-overhead paths (2026-10-28)
+### frame_dt: it was fed the wrong duration (this is why 40 fps felt "under water")
+- Disassembled the game's frame-clock (2.0.2 `f_7001b29660`) with capstone this session (tools/nso.py + lz4, base
+  0x7000000000, offsets 0x1b29660..):
+  - `ldr x8,[x1,#8]` -> the strict bands -> **w8 = vsyncs − 1** (0 at a 16.67 ms frame).
+  - `ldrsb w20,[frameclock+0x20]` -> configured (rt_za_frame_cfg makes it **0** for 60 fps).
+  - `w20 = max(chosen, configured)`; the subsystems then get `update(i, w20)` — and **0 means one vsync** (the game's
+    own measured value is 0 at 60 fps, yet the world moves; the 30 fps mode's configured 1 gives exactly two steps).
+- MEASURED with the new `LARECOMP_FRAME_DT_LOG=1`: the value the game passes in (`[x1,#8]`) is its **CPU-busy time,
+  ~8.5 ms at 60 fps**, NOT the 16.67 ms frame period. So the game's own bands read 0 every frame, and the old
+  accumulator - which added that same ~8.5 ms - could never reach 2 at 40 fps. **That is why the decouple did nothing.**
+- FIX (runtime/hle/framepace.c): accumulate the real wall-clock time between calls (`plat_now_ns`) and report
+  `owed − 1` (the game's "vsyncs − 1" convention): 60 fps -> 0 (one step, unchanged), 40 fps -> 0,1,0,1 (1.5 = full
+  speed), 30 fps -> 1 (two steps). `LARECOMP_FRAME_DT=0` still hands the game's own value back.
+- VERIFIED: an A/B screenshot (same scripted walk, hidden, scratch save) with `LARECOMP_FRAME_DT_FORCE=1` (hand the
+  game w20=1 => two steps) puts the character at a **clearly different point of the walk** vs. the default — so this
+  value does drive the world, and the fix targets the right place. (Screenshots: /tmp/opencode/za-test/{A,B}_*.png.)
+- New test levers: `LARECOMP_FRAME_DT_LOG=1` (`[framedt] call .. dt .. (game ..) -> step ..`),
+  `LARECOMP_FRAME_DT_FORCE=<n>` (always hand the game band[n] = w20 n; its step is n+1).
+
+### Frame generation: no more stalling / pure-overhead work
+- The 20:05 "FG tanks" run was heavily confounded (water/AO/SSGI/upscaler/FSR2 toggled mid-run; `dynamic_res=game`),
+  but its FG-specific costs were clear: a **second** `vk_frame_begin`/acquire + present per game frame, and - with
+  Dynamic resolution on (the ini) - the scene size never matches the presented size, so FG produced **nothing** while
+  still running the MV build + a full-res copy + two full pipeline barriers every frame.
+- FIXES (runtime/nvn/vulkan/{device,exec}.c):
+  - the generated frame now acquires with **timeout 0** (`vk_frame_begin_to`) and is **dropped** when no window image
+    is free - it can no longer stall the render thread (a compositor that can't take two presents a refresh);
+  - `vk_fg_build` returns before the copy when there are no motion vectors at the presented size (Dynamic resolution
+    on / not 1x): FG goes idle instead of pure overhead, with one log line saying why;
+  - `[fg]` logging: the first few lines always, the periodic ones only with `LARECOMP_FG_LOG=1`.
+- **FG still requires `resolution = 1x` and `dynamic_res = off`.** With `dynamic_res = game` (as the ini had) it now
+  stays idle rather than costing frames.
+
+## Tests to run (build #20)
+1. **frame_dt** (the "under water" fix): F1 > Video > Frame rate > Constant game speed **on** (default). Play where
+   the frame rate dips below 60 (e.g. a heavy area) → is the game speed now correct (was ~40/60 speed)? Compare with
+   Constant game speed **off**. `LARECOMP_FRAME_DT_LOG=1` shows `[framedt] dt 27.4 ms -> step 0/1` at ~36 fps.
+2. **FG**: set **Internal resolution 1x** and **Dynamic resolution Off** first, then turn Frame generation on. Does it
+   now hold the frame rate (a dropped generated frame is better than a stalled one)? `LARECOMP_FG_LOG=1` shows
+   `[fg] ... valid=1` and `presenting the generated frame`. With Dynamic on, expect the one-time
+   `[fg] no motion vectors ... frame generation is idle` instead.
+3. Alt-tab (with `LARECOMP_FOCUS_REBUILD=1` if the post-refocus sag remains).

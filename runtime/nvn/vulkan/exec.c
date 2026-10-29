@@ -8671,12 +8671,22 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
         return;
     }
     uint32_t w = cur->width, h = cur->height;
+    // No motion vectors at this size: FG can't produce a frame (the scene isn't the size that is presented - e.g.
+    // Dynamic resolution on, or a resolution other than 1x). Skip the whole pass: the per-frame copy and its full
+    // barriers were pure cost then (frame generation looked like it "tanked" the frame rate with nothing to show).
+    if (!vk_fg_mv || !vk_fg_mv->image || vk_fg_mv->width != w || vk_fg_mv->height != h) {
+        static int told;
+        if (!told) told = 1, LOG("[fg] no motion vectors at %ux%u (scene is another size: Dynamic resolution off and "
+                                 "Internal resolution 1x are needed) - frame generation is idle\n", w, h);
+        prev_frame = 0;
+        return;
+    }
     if (!fg_image(&prev, w, h) || !fg_image(&interp, w, h)) return;
     bool valid = vk_fg_mv && vk_fg_mv->image && vk_fg_mv_frame == frame && vk_fg_mv->width == w &&
                  vk_fg_mv->height == h && prev_frame + 1 == frame;
     static int fglog = -1, nlog;
-    if (fglog < 0) fglog = ENV("LARECOMP_FG_LOG") != NULL;  // (off: the per-frame [fg] note is log spam)
-    if (fglog && (nlog < 6 || frame % 300 == 0)) {
+    if (fglog < 0) fglog = ENV("LARECOMP_FG_LOG") != NULL;
+    if (nlog < 6 || (fglog && frame % 300 == 0)) {  // (the first few always: enough to see valid=1/0; the rest on request)
         nlog++;
         LOG("[fg] frame %llu: on=%d cur=%ux%u mv=%ux%u mvframe=%llu prev=%llu valid=%d\n", (unsigned long long)frame, vk_fg_on(), w, h,
             vk_fg_mv ? vk_fg_mv->width : 0, vk_fg_mv ? vk_fg_mv->height : 0, (unsigned long long)vk_fg_mv_frame,
