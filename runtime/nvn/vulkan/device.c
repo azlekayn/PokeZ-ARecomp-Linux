@@ -1904,6 +1904,20 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 nfg++;
                 LOG("[fg] presenting the generated frame %llu\n", (unsigned long long)frame);
             }
+            // Space the generated frame half a game frame after the game's own present. Presented back-to-back (both
+            // in one refresh) a mailbox / gamescope compositor keeps only the last of the two, so the game stays at
+            // its own rate - a 30 fps game with frame generation on still looked 30 fps (measured on a Steam Deck:
+            // the two presents arrived ~0.3 ms apart, a whole game frame apart from the next pair). Half a game frame
+            // later puts the generated frame on the refresh between two game frames: a 60 Hz display then shows a real
+            // 60. LARECOMP_FG_MID=0: off (present back-to-back, as before); =<ns>: another gap.
+            {
+                extern int g_out_present_interval;  // (objects.c present_pace: the game's present interval)
+                int iv = g_out_present_interval >= 1 && g_out_present_interval <= 4 ? g_out_present_interval : 1;
+                static uint64_t gap = ~0ull;
+                if (gap == ~0ull) { const char *e = getenv("LARECOMP_FG_MID"); gap = e ? strtoull(e, NULL, 10) : 0; }
+                uint64_t half = gap ? gap : 16666667ull * (uint64_t)iv / 2;
+                plat_sleep_until_ns(plat_now_ns() + half);
+            }
             if (vk_frame_begin_to(black2, 0)) {  // (best effort: no free window image now -> drop the generated frame)
                 VkCommandBuffer cb2 = vk_cmd();
                 vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);
