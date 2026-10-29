@@ -807,6 +807,10 @@ NVN(nvnWindowInitialize) {
     memcpy(w->textures, (void *)(uintptr_t)G(uint64_t, A(1), 0x18), w->num * 8);
     w->interval = (int)G(uint32_t, A(1), 0x20);
     w->active = G(uint32_t, A(1), 0x24) ? (int)G(uint32_t, A(1), 0x24) : w->num;
+    for (int i = 0; i < w->num; i++) {  // (known before anything is drawn into them: the Vulkan backend's UI scale)
+        NvnTexture *t = w->textures[i] ? HOST(NvnTexture, w->textures[i]) : NULL;
+        if (t) t->window = true;
+    }
     SET_HOST(A(0), w);
     LOG("[nvn] window with %d textures\n", w->num);
     RET(1);
