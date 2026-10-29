@@ -9572,3 +9572,16 @@ void backend_execute_batch(const uint64_t *handles, int n) {
     if (each < 0) each = ENV("LARECOMP_VK_SUBMIT_EACH") != NULL;
     for (int i = 0; i < n; i++) execute_one(handles[i], each || i == n - 1);
 }
+
+// nvnTextureReadTexels[Strided] (objects.c, on the translating thread): copy_texture_to_buffer with the call's strides
+// in place of the command buffer's (nvnCommandBufferSetCopyStrides) - the GPU's copy, waited for, into data.
+void backend_texture_read(NvnTexture *t, const void *view, const int32_t region[6], void *data, uint64_t row_stride,
+                          uint64_t image_stride) {
+    TexRefRec ref = {.tex = (uint64_t)(uintptr_t)t};
+    if (view) { ref.has_view = 1; memcpy(&ref.view, view, sizeof ref.view); }
+    memcpy(ref.region, region, sizeof ref.region);
+    uint64_t row = st.copy_row_stride, img = st.copy_image_stride;
+    st.copy_row_stride = row_stride, st.copy_image_stride = image_stride;
+    copy_texture_to_buffer(&ref, (uint64_t)(uintptr_t)data);
+    st.copy_row_stride = row, st.copy_image_stride = img;
+}
