@@ -312,10 +312,61 @@ swapchain / reset pacing on focus gain (the port's present-watch already does th
   not just storage) is the main lever. Fix the pipeline's fixed ~6 ms + missed vsync (profile game -> render -> record
   -> present at a trivial view) and it lifts every view.
 
+## The Deck's "decay" was the overlap flipping into series - fixed (2026-10-29 late)
+- NOT latency or a gradual decay: a **step**. Caught live (GPUPROF + the fps line's `deferred` / `wait`): 54 fps until
+  one ~44 ms hitch, then 31-35 for good. Z-A waits on **two fences a frame** (mid-frame A, and B right after its
+  present); the overlap deferred by one *fence*, so B waited for A - the same frame. Fine while the GPU had A done by
+  then; after one slow frame never again: `deferred` 2/frame -> 1/frame, GPU wait 13 -> ~700 ms per 2 s, the GPU
+  idling while the CPU built (a GPUPROF row "5 ms" on a 93-draw depth pass was that idle gap: a row runs to the next
+  submission's first timestamp). The GPU clock parking at 1040 MHz afterwards was an effect, not the cause.
+- **Fix (exec.c `overlap_defer`): one frame late, not one fence.** A wait is for the newest game-frame end older than
+  the fence (`present_seq`, set by `vk_overlap_frame_end` at the end of the present item - after frame generation's
+  frame: B resolves to the item's last submission), plus the fence two waits back as the bound where nothing presents
+  (loading). Verified on the Deck: 54-55 fps held through 90 ms load hitches and F1 round trips; unit test
+  `tools/test_vulkan_overlap.py` (Z-A's two fences, presents before/after the wait, frame generation, loading).
+- Recording *every* present as a frame end broke it again with frame generation on (46 -> 27): fixed as above.
+- Deck at 1x / dynamic res off, overlap on: ~50 fps steady. Overlap's own device-lost after ~90 s (vertex/index race)
+  was NOT seen in ~6 min runs today, but isn't fixed either.
+- `auto` DPM keeps the GPU at 1040 MHz even 99 % busy at 7-8 W of 15: forcing `high` (1600) = +22 % with overlap off.
+- GPU page fault at GPU VA **0x80010c800000** (CB/DB write, permission fault) -> ring timeout -> MODE2 reset: same
+  address on the old build with overlap off and on today's; clustered after earlier resets, gone after a reboot
+  (several clean 2-6 min runs). The process is killed during the hang before it logs (line-buffered: nothing lost),
+  so `LARECOMP_VK_DEVLOST_TRACE` never prints. Unsolved.
+
+## Also this session
+- **Step-override** (za_patches.py `_za_frame_step`, 2.0.2 only, asserts `mov w2, w20` at 0x7001b29778; framepace.c
+  `rt_za_frame_step`): subsystems get max(the game's step, the accumulator's) - 60 fps mode no longer slow-motions
+  below 60. Changes GAMELIB_ID (players recompile). `LARECOMP_FRAME_STEP=0` off. Deck's game code:
+  `aa027aae6a7f3adc-B1F12FD919EAE86A` (compiled on the PC via `LARECOMP_LAUNCHER_EXTRACT=` against a scratch data
+  root with the old `.gamebuild` cache: 2 objects, 110 s).
+- **Mods tab** (menu.mm id 11): the Z-A Royale rows moved there from Video.
+- **Select / Start held back** (input.c `combo_hold`): alone, they reach the game on release (a tap) or after 500 ms
+  held; with the other one pressed meanwhile it's the F1 combo and neither reaches the game. 150 ms still leaked on the
+  Deck. `LARECOMP_MENU_COMBO_HOLD=<ms>`. Confirmed by the user.
+- **Frame generation** (still looks 30 at a 30 cap):
+  - the generated frame is presented half a game frame after the game's, the wait on the recorder (record.c
+    `present_gap_wait`; `LARECOMP_FG_MID=0` off); `[fg] spacing` log line. Measured: presents 16.7 ms apart, exactly -
+    yet MangoHUD's graph stays a 0.3 / 34 ms zig-zag: gamescope shows a frame when its GPU work is done, and the game
+    frame (~21 ms of GPU at 30 fps) finishes a moment before the generated blit queued behind it.
+  - `VK_GOOGLE_display_timing` ("not before" times): gamescope's layer lists it, RADV doesn't; enabled, the first
+    submission after the start screen crashed inside RADV every launch. Now opt-in (`LARECOMP_DISPLAY_TIMING=1`).
+  - Reviewer fixes: the overlay's secondary buffer was ONE_TIME_SUBMIT yet replayed on the generated frame, and its
+    pool reset under the replay's pending submission; motion vectors were tagged as this frame's before an early return.
+- device.c's device extension array was 16 with up to ~23 appends: now 32.
+- Deck `run.sh` extras now: `LARECOMP_VK_DEVLOST_TRACE=1`, `LARECOMP_NO_DISPLAY_TIMING=1` (both removable). Deck ini:
+  `gpu_overlap = on`, `fps60 = 1`, `dynamic_res = off`, `resolution = 1x`. Old AppImages / game code in
+  `ZA-SteamDeck/.backup-20261029/`. Pushing builds: `make appimage` (podman wrapper), serve `build/dist` over HTTP on the
+  LAN, `curl` from the Deck's root shell (tmux `steamdeck`), check sha256, swap.
+
 ## Open items / next session
-1. **Mods tab**: move the "Z-A Royale randomizer" F1 row(s) from Video to a new **Mods** tab (runtime/ui/menu.mm).
-   Wait for the other session's menu.mm edits to settle.
-2. **Royale cadence**: enable the F1 toggle, play a night, grep `<data-root>/lasrecomp.log` for `[royalerandom]`;
-   repeats within a night = per-night, boot-only = add the forced Battle Zone / timer trigger.
-3. **Safe overlap** (vertex/index) and **step-override patch** (`mov w2, w20` in `f_7001b29660`'s update loop, leaving
-   the mode logic alone) - both **validate on the PC first** (screenshot-distance A/B), not by blind Deck recompiles.
+1. **Frame generation on a second GPU queue**: the generated frame has to *finish* half a game frame after the game's,
+   while the GPU renders the next game frame - one queue can't (it finishes right behind it, or stalls the next frame).
+   Its own command buffers and sync (not the main timeline: signals must stay in order), a thread that releases it on
+   time, and a present from that queue (check RADV's present support for it).
+2. **Royale randomizer probably never fires**: fs.c `za_royale_read` looks for `trdata_array.bin` among loose RomFS
+   files, but the game keeps it Oodle-compressed inside `arc/data.trpfs` (FNV-1a path hash -> pack entry, as
+   tools/za/trdata_extract.py reads it). Confirm (`[royalerandom]` never logs with the toggle on), then hook the pack read.
+3. Review branch `worktree-agent-ad664600080292dcf` (settings clamp for za_royale_delta, duplicate `temporal_aa` save
+   line, Python tidy-ups; its two frame-gen fixes are already in). Its notes: `_za_frame_measured` is dead code
+   (za_patches.py - touching it forces a recompile); fs.c royale read past EOF zero-fills.
+4. The 0x80010c800000 GPU page fault (above), and the overlap's vertex/index race.
