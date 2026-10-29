@@ -94,6 +94,61 @@ static bool fps60_holds(void) {
                 "Back to 30 fps (choose 60 again in F1 to retry).", 8);
     return false;
 }
+// ---- Pokémon Z-A: the world step decoupled from the frame rate (tools/za_patches.py)
+// The game's frame step (the function at f_7001b29660: `ldr x8, [x1, #8]`) is the number of 1/60 s vsyncs this frame
+// spanned, read from the frame's duration (16.7 ms -> 1, 33.3 -> 2, ...). At 57 fps a 17.5 ms frame still counts 1, so
+// the world runs at ~95 % speed: slow motion everywhere between 60 and 30 fps (only a frame spanning a whole extra
+// vsync catches up). tools/za_patches.py routes that read here instead: the duration we report comes from a
+// fixed-timestep accumulator - the step is the whole vsyncs owed, the fraction kept for the frames after - so the
+// simulation tracks wall-clock time at any frame rate (and still lands exactly on 60 / 30). LARECOMP_FRAME_DT=0: the
+// game's own duration, as before.
+uint64_t rt_za_frame_dt(uint64_t real_ns) {
+    // (F1 > Video > Frame rate: the "frame_dt" setting, runtime/settings.c; LARECOMP_FRAME_DT is its load-time
+    // override.)
+    static uint64_t acc, last_ns;
+    static bool was_on;
+    if (!g_settings.frame_dt) { was_on = false; return real_ns; }
+    // The duration the game hands us ([x1,#8]) is NOT its frame period: measured at a steady 60 fps it is ~8.5 ms (its
+    // CPU-busy time), so the game's own bands read 0 every frame and an accumulator built on it never advances the
+    // world faster at 40 fps (the decouple did nothing - the world stayed at 40/60 speed). Accumulate the real time
+    // between calls instead. LARECOMP_FRAME_DT=0 hands the game's own value back untouched.
+    uint64_t now = plat_now_ns();
+    if (!was_on) { was_on = true, last_ns = now, acc = 0; }
+    uint64_t dt = now - last_ns;
+    last_ns = now;
+    if (dt > 100000000ull) dt = 100000000ull;  // (a stall over 100 ms: don't jump the world; the excess is dropped)
+    const uint64_t step = 16666667ull;  // (the game's fixed step: 1/60 s)
+    // The game's own bands, by its strict `>` thresholds (16,666,667 / 33,333,366 / 50,000,000 / 66,666,667 ns): a
+    // duration of band[n] reads as n vsyncs. (n is not exactly band-based: its thresholds round.)
+    static const uint64_t band[5] = {0, 16666668ull, 33333367ull, 50000001ull, 66666668ull};
+    // LARECOMP_FRAME_DT_FORCE=<n>: a test - always hand the game band[n] (world step n), whatever the frame rate. If
+    // the game's speed doesn't change with it, this duration isn't what moves the world (the decouple can't help).
+    static int force = -2;
+    if (force == -2) { const char *e = ENV("LARECOMP_FRAME_DT_FORCE"); force = e ? atoi(e) : -1; }
+    uint64_t n;
+    if (force >= 0) {
+        n = (uint64_t)(force > 4 ? 4 : force);  // (the game reads this as w20; its step is w20 + 1)
+    } else {
+        acc += dt;
+        uint64_t owed = acc / step;  // whole 1/60 s vsyncs owed since the last call
+        acc -= owed * step;          // (the remainder is under one step)
+        // The subsystems' step is this value + 1: their "0" is one vsync (the game's own measured value is 0 at 60
+        // fps, yet the world advances; and the 30 fps mode's configured 1 gives exactly two steps). So report the
+        // vsyncs owed less one: 60 fps -> 0 (one step), 40 fps -> 0,1,0,1 (1.5 -> full speed), 30 fps -> 1 (two steps).
+        n = owed ? owed - 1 : 0;
+        if (n > 4) n = 4;  // (the game's own most: a hitch steps at most 4)
+    }
+    static int log = -1;
+    if (log < 0) log = ENV("LARECOMP_FRAME_DT_LOG") != NULL;
+    if (log) {
+        static int nc;
+        if (nc++ < 20 || nc % 60 == 0)
+            LOG("[framedt] call %d dt %llu ns (game %llu) -> step %llu (%s)\n", nc, (unsigned long long)dt,
+                (unsigned long long)real_ns, (unsigned long long)n, force >= 0 ? "forced" : "accumulated");
+    }
+    return band[n];
+}
+
 int32_t rt_za_frame_cfg(int32_t cfg) {
     g_za_frame_hook = true;
     const char *e = ENV("LARECOMP_FPS");

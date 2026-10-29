@@ -50,6 +50,9 @@ typedef struct {
     int sharpen;         // SHARPEN_*: sharpening of the image in the window (Vulkan)
     bool taa;            // Pokémon Z-A: AMD FSR 2's temporal anti-aliasing in place of the game's own (vulkan/exec.c fsr2_copy)
     int gpu_compat[GPU_COMPAT_N];  // GPU_AUTO / GPU_ON / GPU_OFF per GPU_* feature (Compatibility)
+    bool framegen;       // Pokémon Z-A: a generated frame between two, from their colour + motion (vulkan/exec.c vk_fg_build)
+    float fg_strength;   // 0..1: how far the generated frame moves toward the midpoint of the two (1: exactly between)
+    float fg_thresh;     // px: motion under which a pixel keeps the current frame, so static things and the HUD stay sharp
     float volume;        // master volume, 1 = 100%
     bool reverb;         // room reverb effect
     bool movie_audio;
@@ -122,6 +125,9 @@ typedef struct {
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
     char rando_options[48];  // the Randomizer tab's New seed options: a seed ID without its random part (empty = defaults)
     bool fps60_lock;  // with fps60: stays at 60 even when this PC can't hold it (slow motion below; runtime/hle/framepace.c)
+    bool frame_dt;    // Pokémon Z-A: the world's step from a fixed-timestep accumulator (runtime/hle/framepace.c
+                      // rt_za_frame_dt) - the same game speed at any frame rate. Off: the game's own step (slow motion
+                      // below 60 fps). On by default.
     int ui_lang;      // UI_LANG_*: the start screen's language (runtime/ui/launcher.mm); auto = the system's
     // mods/ folders (runtime/services/fs.c layers them): '|' between names. order: first wins where two replace the
     // same file (folders not listed come after, by name); off: not loaded. Edited on the start screen's Mods page.

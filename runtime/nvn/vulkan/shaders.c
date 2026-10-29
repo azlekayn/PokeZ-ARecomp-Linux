@@ -353,6 +353,30 @@ static const char *builtin_src(const char *name, int *stage) {
                "  rx = (s & 0xF0u) == 0x30u ? u.react.x : s == 2u ? u.react.y : 0.0;\n"
                "}\n";
     }
+    // Frame generation (LARECOMP_FRAMEGEN; exec.c vk_fg_build): the frame between the last two, from their colour and
+    // the scene's motion vectors (fsr2_mv.frag above). A pixel at p now was at p + mv a frame ago, so the middle frame
+    // samples each side half way; where the motion vectors are ~0 (the HUD, menus, a cut) both samples are this frame,
+    // so nothing smears there.
+    if (!strcmp(name, "fg_interp.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D prev;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D cur;\n"
+               "layout(set = 0, binding = 2) uniform sampler2D mv;\n"
+               "layout(push_constant) uniform P { vec4 sz; vec4 par; } pc;\n"  // (1/w, 1/h, w, h), (threshold px, strength, -, -)
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  vec2 uv = gl_FragCoord.xy * pc.sz.xy;\n"
+               "  vec3 curc = texture(cur, uv).rgb;\n"
+               "  vec2 mvp = texture(mv, uv).xy;\n"  // motion in pixels (current -> previous)
+               // Interpolate only where the picture actually moves: under the threshold (a still camera, the HUD, a menu)
+               // the exact current frame is shown - sharp, and the UI can't flicker. par.y scales the effect down.
+               "  float t = pc.par.x > 0.0 ? clamp(length(mvp) / pc.par.x, 0.0, 1.0) * pc.par.y : pc.par.y;\n"
+               "  vec2 m = mvp * pc.sz.xy;\n"
+               "  vec3 mid = mix(texture(cur, uv - 0.5 * m).rgb, texture(prev, uv + 0.5 * m).rgb, 0.5);\n"
+               "  o = vec4(mix(curc, mid, t), 1.0);\n"
+               "}\n";
+    }
     // ---- post passes before the present (Video tab "Anti-aliasing" / "Upscaler"): exec.c vk_present_draw.
     // Each draws a fullscreen triangle into an image the size of its output; push constants: two vec4.
     if (!strcmp(name, "post.vert")) {

@@ -28,6 +28,14 @@
 #include <stdlib.h>
 #include <codecvt>
 
+#if !defined(_WIN32)
+// MSVC's safe CRT gives wcscpy_s an array-template overload; the SDK calls it with a fixed
+// name[64] array. Clang/GCC on Linux have no such function, so provide one (ZA Recomp: Linux build).
+#include <wchar.h>
+template <size_t N> static inline void ffx_wcscpy_s(wchar_t (&d)[N], const wchar_t *s) { wcsncpy(d, s, N - 1); d[N - 1] = 0; }
+#define wcscpy_s ffx_wcscpy_s
+#endif
+
 // prototypes for functions in the interface
 FfxErrorCode GetDeviceCapabilitiesVK(FfxFsr2Interface* backendInterface, FfxDeviceCapabilities* deviceCapabilities, FfxDevice device);
 FfxErrorCode CreateBackendContextVK(FfxFsr2Interface* backendInterface, FfxDevice device);

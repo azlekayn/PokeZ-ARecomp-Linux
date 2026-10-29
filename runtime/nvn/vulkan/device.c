@@ -938,8 +938,11 @@ typedef struct { uint32_t image; VkSemaphore acquired; bool ok, secondary, based
 static Frame cur_frame;
 
 // Acquire the next window image and begin rendering into it (cleared to `clear`). Returns false when there is
-// nothing to draw into (minimised window).
-bool vk_frame_begin(const float clear[4]) {
+// nothing to draw into (minimised window). timeout: how long to wait for a free window image - the game's own frames
+// wait forever (UINT64_MAX), the generated frame uses 0 (see backend_present_now): if no image is free right now the
+// generated frame is dropped rather than stalling the render thread (a compositor that can't take two presents a
+// refresh made frame generation 60 -> ~45 fps: acquire blocks for the third/fourth image).
+static bool vk_frame_begin_to(const float clear[4], uint64_t timeout) {
     cur_frame.ok = false;
     if (rq_stopping()) return false;  // quitting: no window image after the window closed (#40)
     int w, h;
@@ -949,6 +952,16 @@ bool vk_frame_begin(const float clear[4]) {
     // on the same swapchain are not allowed at the same time - and it may have asked for a new swapchain
     WAITING(rec_wait_presents(rec_presents_queued()));
     if (rec_present_recreate()) recreate_swapchain();
+    {   // Focus gain: a compositor may leave the swapchain stale across an alt-tab (the acquires then block, once
+        // behind the frame rate never recovers - the frame gen alt-tab finding). Opt-in test lever, off by default:
+        // LARECOMP_FOCUS_REBUILD=1 rebuilds the swapchain on the first frame back with the focus.
+        extern bool ui_window_focused(void);
+        static int focus_rebuild = -1, was_focused;
+        if (focus_rebuild < 0) focus_rebuild = ENV("LARECOMP_FOCUS_REBUILD") != NULL;
+        int focused = ui_window_focused() ? 1 : 0;
+        if (focus_rebuild && focused && !was_focused) recreate_swapchain();
+        was_focused = focused;
+    }
     if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) recreate_swapchain();
     else if (g_vk.hdr != (g_vk.hdr_capable && g_settings.hdr && !ENV("LARECOMP_NO_HDR"))) recreate_swapchain();  // (HDR switched)
     else if (present_fifo_made != g_settings.present_fifo) recreate_swapchain();  // (Frame pacing switched)
@@ -960,12 +973,13 @@ bool vk_frame_begin(const float clear[4]) {
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
     WAITING_AT(0, vk_wait_seq(slot_seq[slot]));
     VkResult r;
-    WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image));
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+    WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, timeout, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image));
+    if (timeout && r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
-        WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE,
+        WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, timeout, acquire_sem[slot], VK_NULL_HANDLE,
                                           &cur_frame.image));
     }
+    if (r == VK_TIMEOUT || r == VK_NOT_READY) return false;  // (best-effort caller: no free window image right now)
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("[vk] acquire failed: %d\n", r); return false; }
     cur_frame.acquired = acquire_sem[slot];
     cur_frame.id++;
@@ -988,6 +1002,9 @@ bool vk_frame_begin(const float clear[4]) {
     cur_frame.ok = true;
     return true;
 }
+
+// The game's own frame: wait for a window image however long it takes.
+bool vk_frame_begin(const float clear[4]) { return vk_frame_begin_to(clear, UINT64_MAX); }
 
 // Passes of their own between vk_frame_begin and vk_frame_end (exec.c post passes): end the window image's
 // rendering, and begin it again keeping what was drawn.
@@ -1059,6 +1076,7 @@ static VkCommandPool ov_pool[FRAMES];
 static VkCommandBuffer ov_cb[FRAMES];
 static uint64_t ov_seq[FRAMES], ov_frame[FRAMES];  // the submission that executed the slot's buffer; the frame it was for
 static VkCommandBuffer ov_open;                    // (handed out by vk_overlay_begin, until vk_overlay_end)
+static VkCommandBuffer ov_last;                    // (vk_overlay_end) this frame's overlay, replayed on the generated frame
 static int ov_direct = -1;
 
 static bool ov_slot_ready(void) {  // (the slot's pool and buffer exist, and the buffer is free to record)
@@ -1124,6 +1142,22 @@ void vk_overlay_end(void *window_cmd, void *cmd) {
     rec_CmdExecuteCommands(cb, 1, &sec);
     cur_frame.secondary = true;
     ov_seq[slot] = vk_pending_seq();  // (the submission window_cmd goes in)
+    ov_last = sec;                    // (the generated frame draws it too; backend_present_now clears it each frame)
+}
+
+// The generated frame (frame generation) draws the game image but none of ImGui's overlay, so the FPS counter and the
+// menu would be missing every other presented frame (they flicker). This replays the overlay vk_overlay_end recorded
+// for the game's own frame, in a rendering of its own - the same thing vk_overlay_end leaves open for vk_frame_end.
+void vk_overlay_replay(VkCommandBuffer cb) {
+    if (!ov_last || !cur_frame.ok) return;
+    rec_CmdEndRendering(cb);
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[cur_frame.image],
+                                    .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                    .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
+                          .renderArea = {{0, 0}, g_vk.sc_extent}, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    rec_CmdBeginRendering(cb, &ri);
+    rec_CmdExecuteCommands(cb, 1, &ov_last);
 }
 
 static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
@@ -1601,6 +1635,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
+    ov_last = VK_NULL_HANDLE;  // (this frame's overlay, if any, is set by vk_overlay_end below)
     // the HD texture switch (F1 > Textures, applied while playing): between frames, on the thread that uploads the
     // textures (the render thread when it is on)
     extern void vk_hd_switch_frame(void);
@@ -1610,6 +1645,13 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     // Its GPU time is counted, and the window image's submission's from after its wait (exec.c gpu_timer_add)
     renderer_submit();
     pp_mark(PP_SUBMIT);
+    // frame generation (F1 > Video > Rendering "Frame generation"; exec.c vk_fg_build): the frame between this and the
+    // last shown image, from the scene's motion vectors. Presented after the game's own frame below, so a game at 60 fps
+    // shows at 120.
+    extern void vk_fg_build(TexBackend *cur, uint64_t frame);
+    extern TexBackend *vk_fg_image;
+    extern uint64_t vk_fg_frame;
+    vk_fg_build(b, frame);
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);
@@ -1691,6 +1733,23 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         bool shot = win_shot && (long)frame + 1 == win_shot;
         vk_frame_end(shot ? "build/window.png" : NULL);
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) exit_after_shot();
+        if (vk_fg_image && vk_fg_frame == frame) {  // frame generation: the generated frame, after the game's own
+            static const float black2[4] = {0, 0, 0, 1};
+            static uint64_t nfg;
+            static int fglog = -1;
+            if (fglog < 0) fglog = getenv("LARECOMP_FG_LOG") != NULL;
+            if (nfg < 6 || (fglog && frame % 300 == 0)) {
+                nfg++;
+                LOG("[fg] presenting the generated frame %llu\n", (unsigned long long)frame);
+            }
+            if (vk_frame_begin_to(black2, 0)) {  // (best effort: no free window image now -> drop the generated frame)
+                VkCommandBuffer cb2 = vk_cmd();
+                vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);
+                extern void vk_overlay_replay(VkCommandBuffer cb);
+                vk_overlay_replay(cb2);  // (the FPS counter / menu the game's own frame drew, or they flicker)
+                vk_frame_end(NULL);
+            }
+        }
     } else {
         renderer_submit();
     }

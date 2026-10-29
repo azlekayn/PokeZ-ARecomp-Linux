@@ -172,11 +172,12 @@ $(B)/inc/fsr2_shaders.inc: $(FSR2_SHADERS)
 	for f in $(FSR2_SHADERS); do echo "{\"$$(basename $$f)\","; LC_ALL=C tr -d '\r' < $$f | LC_ALL=C tr '\200-\377' '?' | \
 	  sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/'; echo "},"; done > $@
 $(B)/rt/nvn/vulkan/fsr2_shaders.o: $(B)/inc/fsr2_shaders.inc
-$(B)/rt/nvn/vulkan/fsr2_shaders.o: CXXFLAGS += -I$(B)/inc
+$(B)/rt/nvn/vulkan/fsr2_shaders.o: CXXFLAGS += -I$(B)/inc -DFFX_GCC
 FSR2_OBJ := $(B)/fsr2/ffx_fsr2.o $(B)/fsr2/ffx_assert.o $(B)/fsr2/vk/ffx_fsr2_vk.o
 $(B)/fsr2/%.o: third_party/fsr2/%.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -Wno-absolute-value -c $< -o $@
+	$(CXX) $(CXXFLAGS) -DFFX_GCC -include stddef.h -Wno-absolute-value -c $< -o $@
+$(B)/rt/nvn/vulkan/fsr2.o: CXXFLAGS += -DFFX_GCC -include stddef.h  # (the SDK's headers: FFX_API, size_t)
 
 # The shader preparation's variant list (runtime/nvn/shader_prep.h: no shader code, hashes and pipeline state only)
 # as a C string for runtime/nvn/shader_prep.c
