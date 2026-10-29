@@ -596,18 +596,120 @@ void rec_QueueSubmit2(const VkSubmitInfo2 *si, uint64_t seq) {
     ENQ_END();
 }
 
-typedef struct { VkSemaphore wait; VkSwapchainKHR swapchain; uint32_t image; uint64_t id; } PresentArgs;
+typedef struct { VkSemaphore wait; VkSwapchainKHR swapchain; uint32_t image; uint64_t id, gap; } PresentArgs;
 void vk_present_watch(uint64_t id);  // (device.c)
+static uint64_t next_gap;  // (T's) rec_next_present_gap: for the next present only
+void rec_next_present_gap(uint64_t gap_ns) { next_gap = gap_ns; }
+// A present with a gap (frame generation's frame, device.c): issued `gap` after the last present without one (1: half
+// the measured interval between those - half a game frame). Presented right after the game's own, both reached the
+// display in one refresh and the compositor showed only the second: the generated frame was counted (MangoHUD: 60)
+// but a 30 fps game still looked 30, its frame times a zig-zag of ~0.3 / ~33 ms. The wait is this thread's (busy
+// ~8.5 ms of a 33 ms Steam Deck frame): sleeping the render thread instead, its ~24 ms of work, cost 30 -> 25 fps.
+// `last`: when the gapless present's vkQueuePresentKHR returned - with FIFO that call can wait for the display a
+// refresh, and timed from its start the gap was already over: back-to-back again.
+static uint64_t gap_last, gap_iv;  // (R's) the last gapless present's time, the interval between them (smoothed)
+static void present_gap_note(void) {
+    uint64_t now = NOW();
+    if (gap_last && now - gap_last < 200000000) gap_iv = gap_iv ? (gap_iv * 7 + (now - gap_last)) / 8 : now - gap_last;
+    gap_last = now;
+}
+// (the log's [fg] spacing line: what the generated presents really got, over ~120 of them)
+static uint64_t gs_n, gs_sleep, gs_after, gs_call[2], gs_calls[2];
+
+// VK_GOOGLE_display_timing (gamescope's layer has it). Spacing the present calls wasn't enough there: gamescope shows a
+// frame once its GPU work is done, and the game frame's (~21 ms of it on a Steam Deck at 30 fps) finished a moment
+// before the generated frame's small blit queued behind it - the pair still arrived together (MangoHUD: 0.3 / 34 ms).
+// So the generated frame asks the display for a time instead: no earlier than the game frame's predicted time on
+// screen plus the gap. The prediction: the latest game frame the display reports as shown, plus a game frame interval
+// (its smoothed actual one) for each game frame presented since. All on this thread (the presents' own).
+static PFN_vkGetPastPresentationTimingGOOGLE dt_past;
+void rec_display_timing_init(PFN_vkGetPastPresentationTimingGOOGLE past) { dt_past = past; }
+#define DT_RING 64
+static struct { uint32_t id; bool gen; uint64_t real_n; } dt_ring[DT_RING];  // (presents by display timing id)
+static uint32_t dt_id;                                // the last id given
+static uint64_t dt_real_n;                            // game frames presented (gapless presents)
+static uint64_t dt_base_n, dt_base_t, dt_iv;          // the latest game frame shown: its number, its time; the interval
+static uint64_t dt_real_shown[DT_RING];               // (by real_n % DT_RING) when that game frame was shown
+static uint64_t gd_n, gd_after, gd_want;              // (stats) generated frames shown: after their game frame, asked for
+static VkSwapchainKHR dt_sc;
+static void dt_poll(VkSwapchainKHR sc) {  // what the display reports since the last call
+    if (sc != dt_sc) { dt_sc = sc, dt_base_n = dt_base_t = 0; return; }  // (a new swapchain: its own ids and times)
+    VkPastPresentationTimingGOOGLE t[16];
+    uint32_t n = 16;
+    VkResult r = dt_past(g_vk.dev, sc, &n, t);
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) return;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t k = t[i].presentID % DT_RING;
+        if (dt_ring[k].id != t[i].presentID || !t[i].actualPresentTime) continue;
+        uint64_t rn = dt_ring[k].real_n, at = t[i].actualPresentTime;
+        if (!dt_ring[k].gen) {
+            if (dt_base_t && rn > dt_base_n && at > dt_base_t) {
+                uint64_t iv = (at - dt_base_t) / (rn - dt_base_n);
+                if (iv < 200000000) dt_iv = dt_iv ? (dt_iv * 7 + iv) / 8 : iv;
+            }
+            if (rn >= dt_base_n) dt_base_n = rn, dt_base_t = at;
+            dt_real_shown[rn % DT_RING] = at;
+        } else if (dt_real_shown[rn % DT_RING] && at > dt_real_shown[rn % DT_RING]) {
+            gd_n++, gd_after += at - dt_real_shown[rn % DT_RING];
+        }
+    }
+}
+// The display timing to attach to this present (*want: its "not before", 0 = any time); false: none
+static bool dt_present(const PresentArgs *a, VkPresentTimeGOOGLE *pt) {
+    if (!dt_past) return false;
+    dt_poll(a->swapchain);
+    if (!a->gap) dt_real_n++;
+    uint64_t want = 0;
+    if (a->gap && dt_base_t && dt_iv) {
+        uint64_t shown = dt_base_t + (dt_real_n - dt_base_n) * dt_iv;  // (this game frame's predicted time on screen)
+        want = shown + (a->gap == 1 ? dt_iv / 2 : a->gap);
+        gd_want += want > NOW() ? want - NOW() : 0;
+    }
+    pt->presentID = ++dt_id, pt->desiredPresentTime = want;
+    dt_ring[dt_id % DT_RING].id = dt_id, dt_ring[dt_id % DT_RING].gen = a->gap != 0, dt_ring[dt_id % DT_RING].real_n = dt_real_n;
+    return true;
+}
+
+static void present_gap_wait(const PresentArgs *a) {
+    if (!a->gap) return;
+    if (dt_past && dt_iv) { gs_n++; return; }  // (the display holds it: dt_present)
+    uint64_t now = NOW(), last = gap_last, gap = a->gap == 1 ? gap_iv / 2 : a->gap, slept = 0;
+    if (gap > 50000000) gap = 50000000;  // (a stall's interval: no long sleep here, the next frame's commands wait)
+    if (last && last + gap > now) plat_sleep_until_ns(last + gap), slept = last + gap - now;
+    gs_n++, gs_sleep += slept, gs_after += last ? NOW() - last : 0;
+}
+static void present_gap_stats(const PresentArgs *a, uint64_t call_ns) {
+    gs_call[a->gap != 0] += call_ns, gs_calls[a->gap != 0]++;
+    if (!a->gap || gs_n < 120) return;
+    if (dt_past && dt_iv)
+        LOG("[fg] spacing (display timing): generated frames shown %.1f ms after their game frame (%llu of %llu reported), "
+            "asked for %.1f ms ahead; game frames shown %.1f ms apart\n", gd_n ? gd_after / 1e6 / gd_n : 0.0,
+            (unsigned long long)gd_n, (unsigned long long)gs_n, gd_want / 1e6 / gs_n, dt_iv / 1e6);
+    else
+        LOG("[fg] spacing: the generated present %.1f ms after the game's (asked %s, slept %.1f ms); present calls took "
+            "%.2f ms (game's) / %.2f ms (generated); game frames %.1f ms apart\n", gs_after / 1e6 / gs_n,
+            a->gap == 1 ? "half a frame" : "a set gap", gs_sleep / 1e6 / gs_n, gs_calls[0] ? gs_call[0] / 1e6 / gs_calls[0] : 0.0,
+            gs_calls[1] ? gs_call[1] / 1e6 / gs_calls[1] : 0.0, gap_iv / 1e6);
+    gs_n = gs_sleep = gs_after = gd_n = gd_after = gd_want = 0, memset(gs_call, 0, sizeof gs_call), memset(gs_calls, 0, sizeof gs_calls);
+}
 static void present_run(const void *p) {
     const PresentArgs *a = p;
+    present_gap_wait(a);
     VkPresentIdKHR pid = {.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR, .swapchainCount = 1, .pPresentIds = &a->id};
-    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .pNext = a->id ? &pid : NULL,
+    VkPresentTimeGOOGLE ptime;
+    VkPresentTimesInfoGOOGLE ptimes = {.sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, .swapchainCount = 1, .pTimes = &ptime};
+    void *chain = a->id ? &pid : NULL;
+    if (dt_present(a, &ptime)) ptimes.pNext = chain, chain = &ptimes;
+    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .pNext = chain,
                            .waitSemaphoreCount = 1, .pWaitSemaphores = &a->wait,
                            .swapchainCount = 1, .pSwapchains = &a->swapchain, .pImageIndices = &a->image};
     uint64_t t0 = NOW();
     rq_watch("vkQueuePresentKHR", a->image);
+    uint64_t tc = NOW();
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
     rq_watch(NULL, 0);
+    if (!a->gap) present_gap_note();
+    present_gap_stats(a, NOW() - tc);
     uint64_t dt = NOW() - t0;
     __atomic_fetch_add(&g_vk_frame_waits[2], dt, __ATOMIC_RELAXED);
     if (dt > 250000000) {  // (FIFO waits for the display, a few ms; this long is a stall in the driver or the compositor)
@@ -630,7 +732,8 @@ static void present_run(const void *p) {
     }
 }
 void rec_QueuePresentKHR(VkSemaphore wait, VkSwapchainKHR swapchain, uint32_t image, uint64_t present_id) {
-    PresentArgs a = {wait, swapchain, image, present_id};
+    PresentArgs a = {wait, swapchain, image, present_id, next_gap};
+    next_gap = 0;
     presents_queued++;
     if (on <= 0) {  // (the wait is this thread's: idle for the pacer, as before)
         uint64_t t0 = NOW();

@@ -31,6 +31,12 @@ void rec_QueueSubmit2(const VkSubmitInfo2 *si, uint64_t seq);
 // none): after a successful present, the recorder runs vk_present_watch(present_id) - vkWaitForPresentKHR needs the
 // swapchain synchronised with the presents (device.c).
 void rec_QueuePresentKHR(VkSemaphore wait, VkSwapchainKHR swapchain, uint32_t image, uint64_t present_id);
+// The next rec_QueuePresentKHR is issued gap_ns after the last present without one (1: half the measured interval
+// between those) - frame generation's frame, half a game frame after the game's own (record.c present_gap_wait).
+void rec_next_present_gap(uint64_t gap_ns);
+// VK_GOOGLE_display_timing (device.c; NULL: none): the gap is then a "not before" time for the display - the game frame's
+// predicted time on screen plus the gap - instead of a wait before the present (record.c present_gap_wait)
+void rec_display_timing_init(PFN_vkGetPastPresentationTimingGOOGLE past);
 bool rec_present_recreate(void);  // (and clears it) the last present asked for a new swapchain (OUT_OF_DATE / SUBOPTIMAL)
 
 // ---- descriptor sets (the translating thread only)
