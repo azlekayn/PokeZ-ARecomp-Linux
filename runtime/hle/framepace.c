@@ -102,12 +102,13 @@ static bool fps60_holds(void) {
 // fixed-timestep accumulator - the step is the whole vsyncs owed, the fraction kept for the frames after - so the
 // simulation tracks wall-clock time at any frame rate (and still lands exactly on 60 / 30). LARECOMP_FRAME_DT=0: the
 // game's own duration, as before.
+static uint32_t za_step_n;  // (the game thread) rt_za_frame_dt's step for this frame: rt_za_frame_step hands it on
 uint64_t rt_za_frame_dt(uint64_t real_ns) {
     // (F1 > Video > Frame rate: the "frame_dt" setting, runtime/settings.c; LARECOMP_FRAME_DT is its load-time
     // override.)
     static uint64_t acc, last_ns;
     static bool was_on;
-    if (!g_settings.frame_dt) { was_on = false; return real_ns; }
+    if (!g_settings.frame_dt) { was_on = false, za_step_n = 0; return real_ns; }
     // The duration the game hands us ([x1,#8]) is NOT its frame period: measured at a steady 60 fps it is ~8.5 ms (its
     // CPU-busy time), so the game's own bands read 0 every frame and an accumulator built on it never advances the
     // world faster at 40 fps (the decouple did nothing - the world stayed at 40/60 speed). Accumulate the real time
@@ -146,7 +147,21 @@ uint64_t rt_za_frame_dt(uint64_t real_ns) {
             LOG("[framedt] call %d dt %llu ns (game %llu) -> step %llu (%s)\n", nc, (unsigned long long)dt,
                 (unsigned long long)real_ns, (unsigned long long)n, force >= 0 ? "forced" : "accumulated");
     }
+    za_step_n = (uint32_t)n;
     return band[n];
+}
+
+// The step each subsystem is handed (the same function's update loop, `mov w2, w20`: tools/za_patches.py). The
+// duration above only reaches the game in its 30 fps mode: in its 60 fps mode the frame clock takes its configured
+// step (0) and ignores the measured one, so the world stepped 1/60 s a frame and slowed down below 60 fps. Here the
+// subsystems get max(the game's step, the accumulator's), the frame clock's own choice and mode untouched (forcing
+// its measured-duration flag instead flipped its 60 / 30 controller and doubled the speed: reverted 9290029).
+// LARECOMP_FRAME_STEP=0: the game's step, as before.
+uint32_t rt_za_frame_step(uint32_t game_step) {
+    static int on = -1;
+    if (on < 0) { const char *e = ENV("LARECOMP_FRAME_STEP"); on = !e || atoi(e) != 0; }
+    if (!on || !g_settings.frame_dt) return game_step;
+    return za_step_n > game_step ? za_step_n : game_step;
 }
 
 int32_t rt_za_frame_cfg(int32_t cfg) {
