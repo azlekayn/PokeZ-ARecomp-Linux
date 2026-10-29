@@ -359,10 +359,20 @@ swapchain / reset pacing on focus gain (the port's present-watch already does th
   LAN, `curl` from the Deck's root shell (tmux `steamdeck`), check sha256, swap.
 
 ## Open items / next session
-1. **Frame generation on a second GPU queue**: the generated frame has to *finish* half a game frame after the game's,
-   while the GPU renders the next game frame - one queue can't (it finishes right behind it, or stalls the next frame).
-   Its own command buffers and sync (not the main timeline: signals must stay in order), a thread that releases it on
-   time, and a present from that queue (check RADV's present support for it).
+1. **Frame generation: presentation solved, content isn't (2026-10-29 evening).**
+   - DONE: the generated frame is drawn into an image of its own (fgq) and presented by a thread from a compute queue
+     (the Deck has one that can present: `[vk] frame generation's queue: a compute queue...`), half a measured game
+     frame after the game frame's GPU work finished. Verified: `[fg] queue:` 18 ms after (of 33.4), ~0 dropped,
+     MangoHUD's graph flat (no more 0.3 / 34 ms zig-zag). Swapchain lock `rec_sc_lock` (render thread's acquire in 2 ms
+     slices, recorder's present, the thread). `LARECOMP_FG_QUEUE=0` off.
+   - The generated frame is now extrapolated (current frame + half its motion) - the midpoint of the last two shown
+     *after* the current one stepped back half a frame each time. `LARECOMP_FG_MODE=interp` = old.
+   - STILL looks 30: `LARECOMP_FG_DUMP=<frame>` (-> `<data root>/build/fg_{cur,gen,mv}.png`; create build/) showed
+     fg_gen.png byte-identical to fg_cur.png and max |mv| 0.2 px while the camera turned = the TAA jitter only. The
+     matrix mv_note_draw takes (G-buffer pass, `st.ubuf[0][2]` = cb5) has no camera rotation in Z-A (projection only?).
+     NEXT: log the G-buffer pass's constant-buffer matrices over frames while the camera turns, find the one that moves
+     (view-projection). This is FSR 2's input too - it has never had camera motion in Z-A.
+   - Also: the scene occupies the top-left 854x480 of 1280x720 (see 5.) - the mv pass must use that region.
 2. **Royale randomizer probably never fires**: fs.c `za_royale_read` looks for `trdata_array.bin` among loose RomFS
    files, but the game keeps it Oodle-compressed inside `arc/data.trpfs` (FNV-1a path hash -> pack entry, as
    tools/za/trdata_extract.py reads it). Confirm (`[royalerandom]` never logs with the toggle on), then hook the pack read.
@@ -370,3 +380,8 @@ swapchain / reset pacing on focus gain (the port's present-watch already does th
    line, Python tidy-ups; its two frame-gen fixes are already in). Its notes: `_za_frame_measured` is dead code
    (za_patches.py - touching it forces a recompile); fs.c royale read past EOF zero-fills.
 4. The 0x80010c800000 GPU page fault (above), and the overlap's vertex/index race.
+5. **Handheld renders at 480p, HUD included** (the UI blur): Z-A handheld keeps 1920x1080 targets and draws 1280x720
+   (`[present] ... crop 0,0 1280x720`); output_scale.c assumes handheld targets are 1280x720 and "1x on an integrated
+   GPU" = 720 of 1080 lines -> scale 0.667 -> 854x480. Options: handheld 1x = 720p (`h = 1` when hh: ~2.25x the
+   pixels, the Deck's GPU is near its limit at 30); or the real fix, the HUD at the window's resolution and the 3D
+   scene low: the shown image (scene copied in, HUD drawn over: the FSR 2 / HDR boundary) gets its own scale.
