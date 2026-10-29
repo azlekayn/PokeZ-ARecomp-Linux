@@ -475,6 +475,24 @@ static void tab_display(void) {
                           "O mundo roda na mesma velocidade em qualquer taxa de quadros: o passo do jogo vem de um "
                           "acumulador de passo fixo, então 57 fps joga a 57 fps de jogo, não 95%. Desligado: o passo do "
                           "próprio jogo - abaixo de 60 fps tudo fica em câmera lenta (como no Switch)."));
+            // Pokémon Z-A: the night Z-A Royale trainers change every load (runtime/hle/royale_random.c). Runtime-only:
+            // no game recompile. Off: the game's fixed table - or, if one is installed, a mod's trdata_array.bin.
+            opt_toggle(TR("Z-A Royale randomizer", "Aleatorizador da Royale Z-A"), &g_settings.za_royale_random, false,
+                       TR("Every night the Z-A Royale's Battle Zone trainers are rolled again as they load: random "
+                          "species and natures, levels within a range of each trainer's own, so each night differs. "
+                          "Trainer names and appearances are kept, and the rest of the game's trainers are untouched. "
+                          "Has no effect while a mod replaces the trainer table.",
+                          "Toda noite os treinadores da Zona de Batalha da Royale Z-A são sorteados de novo ao carregar: "
+                          "espécies e naturezas aleatórias, níveis dentro de uma faixa do próprio treinador, então cada "
+                          "noite é diferente. Nomes e aparências são mantidos, e os demais treinadores do jogo não mudam. "
+                          "Não tem efeito enquanto um mod substitui a tabela de treinadores."));
+            if (g_settings.za_royale_random) {
+                float d = (float)g_settings.za_royale_delta;
+                if (opt_slider(TR("Royale level range", "Faixa de nível da Royale"), &d, 0, 20, 1, 5, "+/-%g",
+                               TR("How far a rolled Pokemon's level may stray from that trainer's own level.",
+                                  "O quanto o nível de um Pokémon sorteado pode variar do nível do próprio treinador.")))
+                    g_settings.za_royale_delta = (int)d;
+            }
         }
     }
     {   // (runtime/nvn/vulkan/textures.c vk_sampler_settings: every sampler made again, at once)

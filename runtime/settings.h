@@ -128,6 +128,9 @@ typedef struct {
     bool frame_dt;    // Pokémon Z-A: the world's step from a fixed-timestep accumulator (runtime/hle/framepace.c
                       // rt_za_frame_dt) - the same game speed at any frame rate. Off: the game's own step (slow motion
                       // below 60 fps). On by default.
+    bool za_royale_random;  // Pokémon Z-A: re-roll the night Z-A Royale trainers each load, so every night differs
+                            // (runtime/hle/royale_random.c). Off by default.
+    int za_royale_delta;    // its level +/- around each trainer's own level (default 5)
     int ui_lang;      // UI_LANG_*: the start screen's language (runtime/ui/launcher.mm); auto = the system's
     // mods/ folders (runtime/services/fs.c layers them): '|' between names. order: first wins where two replace the
     // same file (folders not listed come after, by name); off: not loaded. Edited on the start screen's Mods page.
