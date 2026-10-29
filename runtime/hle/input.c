@@ -854,6 +854,53 @@ void input_frame(uint64_t frame) {
 
 extern bool menu_input_captured(void);  // runtime/ui/menu.mm: overlay menu or name entry up (it has the keys / pad)
 
+// The menu's controller combo, Back + Start (runtime/ui/menu.mm): whichever of the two went down first reached the game
+// on its own before the other one did - the map (-) or the camera (+) opened under the menu. So a press of either one
+// alone is held back from the game: the other one following while it is held is the combo (neither reaches the game,
+// until both are up again). Released alone, the game gets it as a tap then; held longer than the limit, it goes through
+// as a held press. (A 150 ms limit still let the combo through now and then on a Steam Deck: two thumbs on small
+// buttons are slower than that.) Controller only (a key bound to + / - is not held back), on the game thread
+// (fill_state's polls). LARECOMP_MENU_COMBO_HOLD=<ms>: the limit (default 500; 0 off).
+static uint64_t combo_hold(uint64_t b, bool menu) {
+    static int64_t hold_ns = -1;
+    if (hold_ns < 0) {
+        const char *e = getenv("LARECOMP_MENU_COMBO_HOLD");
+        hold_ns = (e ? atoll(e) : 500) * 1000000ll;
+        if (hold_ns < 0) hold_ns = 0;
+    }
+    if (!hold_ns) return b;
+    extern uint64_t renderer_present_count(void);
+    uint64_t mb[2] = {pad_bits(SDL_GAMEPAD_BUTTON_BACK), pad_bits(SDL_GAMEPAD_BUTTON_START)};
+    static uint64_t since[2], tap_until[2];  // (a press held back: when it went down; a late tap: until which frame)
+    static bool pass[2], combo;              // (held back long enough: goes through until released; the combo is held)
+    uint64_t now = plat_now_ns(), frame = renderer_present_count(), pad = pad_buttons, other = key_buttons | mouse_buttons;
+    bool down[2] = {(pad & mb[0]) != 0, (pad & mb[1]) != 0};
+    if (menu) {  // (the menu has the controller - the combo's own doing, often: what is still held when it closes waits for
+                 // its release, and nothing held back now comes out as a tap afterwards)
+        combo = down[0] || down[1];
+        since[0] = since[1] = tap_until[0] = tap_until[1] = 0, pass[0] = pass[1] = false;
+        return b;
+    }
+    if (down[0] && down[1]) combo = true;
+    bool ending = combo && !down[0] && !down[1];
+    for (int k = 0; k < 2; k++) {
+        if (!mb[k]) continue;
+        uint64_t mask = mb[k] & ~other;  // (the same button from the keyboard / mouse: not this combo's)
+        if (combo) { since[k] = 0, pass[k] = false, tap_until[k] = 0, b &= ~mask; continue; }
+        if (!down[k]) {
+            if (since[k] && !pass[k]) tap_until[k] = frame + 2;  // (released while held back, alone: a tap)
+            since[k] = 0, pass[k] = false;
+        } else {
+            if (!since[k]) since[k] = now;
+            if (!pass[k] && now - since[k] >= (uint64_t)hold_ns) pass[k] = true;
+            if (!pass[k]) b &= ~mask;
+        }
+        if (frame < tap_until[k]) b |= mb[k];
+    }
+    if (ending) combo = false;  // (after the loop: the combo's release is no tap)
+    return b;
+}
+
 // Buttons held right now (keyboard, gamepad, test script), independent of whether the game polls (movies).
 uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons) | script_buttons; }
 
@@ -910,7 +957,8 @@ static void fill_state(Cpu *c) {
             if (getenv("LARECOMP_INPUT")) LOG("[input] short press %#llx\n", (unsigned long long)t);
         } else if (f > tap_frame) tap = 0;
     }
-    uint64_t b = menu ? script_buttons : held | tap | script_buttons;
+    uint64_t b = combo_hold(held | tap, menu);  // (also with the menu up: it keeps track)
+    b = menu ? script_buttons : b | script_buttons;
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_present_count(void);
         static uint64_t until;
