@@ -461,7 +461,9 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     }
     p_mode = mode, p_ups = g_settings.upscaler, p_aa = g_settings.antialias;
     if (forced > 0) h = forced;
-    else if (mode >= 1 && mode <= 8) h = mode == 1 && g_gpu_integrated ? 720 / 1080.0 : mode;
+    // (1x on an integrated GPU: 720 lines - of a docked game's 1080; a handheld game's own picture is 720 lines already:
+    // 720/1080 of it drew 480, HUD and all, on a Steam Deck set to "720p")
+    else if (mode >= 1 && mode <= 8) h = mode == 1 && g_gpu_integrated && !hh ? 720 / 1080.0 : mode;
     else if (mode == RES_X15) h = 1.5;  // (between 1x and 2x: most of 2x's smoothing for about half its cost)
     else {
         h = reshape ? dh / 1080.0 : fit;  // Match display
