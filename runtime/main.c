@@ -20,6 +20,9 @@
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 #endif
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 const char *g_romfs_dir;
 
@@ -270,6 +273,12 @@ static void log_startup_info(void) {
 }
 
 int main(int argc, char **argv) {
+#ifdef __linux__
+    // The process's name (what pgrep / top / htop show, 15 characters at most) is the binary's, lasrecomp, from the
+    // upstream it was forked from: this is Pokémon Z-A's. Threads made after this take it too, unless named themselves
+    // (`ps -f` still shows the AppImage's path). tools/za/{play,auto}.sh look for it under this name.
+    prctl(PR_SET_NAME, "pokemon-za", 0, 0, 0);
+#endif
     plat_init();
     log_startup_info();
     if (getenv("LARECOMP_REEXEC")) {  // (reserve_guest_space started this process again)
