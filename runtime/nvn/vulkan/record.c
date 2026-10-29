@@ -237,6 +237,12 @@ static void slow_wait(const char *what, uint64_t ns) {
 
 uint64_t rec_submitted(void) { return atomic_load_explicit(&submitted, memory_order_acquire); }
 uint64_t rec_presents_queued(void) { return presents_queued; }
+uint64_t rec_presents_done(void) { return atomic_load_explicit(&presents_done, memory_order_acquire); }
+// The swapchain: acquire and present on it must not run at the same time. T acquires only once this thread's presents
+// are done (rec_wait_presents), but frame generation's own present thread (device.c fgq) acquires and presents too.
+static pthread_mutex_t sc_mu = PTHREAD_MUTEX_INITIALIZER;
+void rec_sc_lock(void) { pthread_mutex_lock(&sc_mu); }
+void rec_sc_unlock(void) { pthread_mutex_unlock(&sc_mu); }
 
 void rec_wait_submitted(uint64_t seq) {
     if (on <= 0 || rec_submitted() >= seq) return;
@@ -706,7 +712,9 @@ static void present_run(const void *p) {
     uint64_t t0 = NOW();
     rq_watch("vkQueuePresentKHR", a->image);
     uint64_t tc = NOW();
+    pthread_mutex_lock(&sc_mu);
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
+    pthread_mutex_unlock(&sc_mu);
     rq_watch(NULL, 0);
     if (!a->gap) present_gap_note();
     present_gap_stats(a, NOW() - tc);

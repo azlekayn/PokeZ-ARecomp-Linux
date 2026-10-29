@@ -55,6 +55,9 @@ uint64_t rec_submitted(void);          // the latest submission handed to the dr
 void rec_wait_submitted(uint64_t seq); // until the driver has submission seq (seq must have been passed to rec_QueueSubmit2)
 void rec_wait_presents(uint64_t n);    // until the recorder made n presents (rec_presents_queued() counts them)
 uint64_t rec_presents_queued(void);
+uint64_t rec_presents_done(void);      // presents the recorder has made
+void rec_sc_lock(void);                // the swapchain's lock: acquire / present not at once (record.c sc_mu)
+void rec_sc_unlock(void);
 // Everything queued so far is recorded and submitted (the translating thread): before vkDeviceWaitIdle, before
 // recording into a command buffer directly (ImGui), before using the queue outside the ring.
 void rec_drain(void);

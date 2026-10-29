@@ -262,6 +262,17 @@ static void pick_device(void) {
             break;
         }
     }
+    // A compute-only family that can present too: frame generation's frame is copied to the window and presented from
+    // it, alongside the next game frame's rendering (fgq, below). LARECOMP_FG_QUEUE=0: none
+    g_vk.cqfam = UINT32_MAX;
+    for (uint32_t i = 0; i < nq && (!ENV("LARECOMP_FG_QUEUE") || atoi(ENV("LARECOMP_FG_QUEUE"))); i++) {
+        VkBool32 present = VK_FALSE;
+        vkGetPhysicalDeviceSurfaceSupportKHR(g_vk.phys, i, g_vk.surface, &present);
+        if (i != g_vk.qfam && (qp[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && !(qp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present) {
+            g_vk.cqfam = i;
+            break;
+        }
+    }
     free(qp);
     if (g_vk.qfam == UINT32_MAX) FATAL("no graphics+present queue\n");
     {   // (with the [system] line, runtime/main.c: kind, video memory, driver - what a report needs)
@@ -813,13 +824,20 @@ static void create_device(void) {
     b->geometryShader = h->geometryShader;  // (fragment shaders reading gl_Layer: the Geometry capability)
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     float prio = 1.0f;
-    VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
-                                  .queueCount = 1, .pQueuePriorities = &prio};
-    VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
-                             .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
+    VkDeviceQueueCreateInfo qi[2] = {{.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
+                                      .queueCount = 1, .pQueuePriorities = &prio},
+                                     {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.cqfam,
+                                      .queueCount = 1, .pQueuePriorities = &prio}};
+    VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f,
+                             .queueCreateInfoCount = g_vk.cqfam != UINT32_MAX ? 2 : 1,
+                             .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     if (ab_on) ab_feat.pNext = (void *)di.pNext, di.pNext = &ab_feat;
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
+    g_vk.cqueue = VK_NULL_HANDLE;
+    if (g_vk.cqfam != UINT32_MAX) vkGetDeviceQueue(g_vk.dev, g_vk.cqfam, 0, &g_vk.cqueue);
+    LOG("[vk] frame generation's queue: %s\n", g_vk.cqueue ? "a compute queue that can present (its frame on time)"
+                                                           : "none (the generated frame goes with the game's)");
 #define VK_LOAD_COMMAND(f)                                                                                            \
     if (!(vkp_##f = (PFN_##f)vkGetDeviceProcAddr(g_vk.dev, #f)))                                                     \
         FATAL("the GPU driver has no %s: update it (Vulkan 1.2 is needed)\n", #f);
@@ -1048,8 +1066,10 @@ static void create_swapchain(void) {
     }
 }
 
+static void fgq_drain(void);  // (frame generation's present thread, below)
 static void recreate_swapchain(void) {
     rec_drain();  // (every queued present and submission made: the queue is idle for the wait)
+    fgq_drain();  // (and frame generation's thread: nothing on its queue or this swapchain)
     vkDeviceWaitIdle(g_vk.dev);
     create_swapchain();
 }
@@ -1094,14 +1114,31 @@ static void image_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, V
 
 // id: frames acquired so far; secondary: the window image's rendering open now is the overlay's (vk_overlay_end), for
 // secondary command buffers only; based: vk_hdr_mark_base copied the window image this frame
-typedef struct { uint32_t image; VkSemaphore acquired; bool ok, secondary, based; uint64_t id; } Frame;
-static Frame cur_frame;
+// off: >= 0, the frame is drawn into frame generation's own image fgq[off] instead of a window image (fgq, below)
+typedef struct { uint32_t image; VkSemaphore acquired; bool ok, secondary, based; uint64_t id; int off; } Frame;
+static Frame cur_frame = {.off = -1};
+static VkImageView fgq_view_of(int k);  // (fgq)
+static VkImageView frame_view(void) { return cur_frame.off >= 0 ? fgq_view_of(cur_frame.off) : g_vk.sc_views[cur_frame.image]; }
 
 // Acquire the next window image and begin rendering into it (cleared to `clear`). Returns false when there is
 // nothing to draw into (minimised window). timeout: how long to wait for a free window image - the game's own frames
 // wait forever (UINT64_MAX), the generated frame uses 0 (see backend_present_now): if no image is free right now the
 // generated frame is dropped rather than stalling the render thread (a compositor that can't take two presents a
 // refresh made frame generation 60 -> ~45 fps: acquire blocks for the third/fourth image).
+// vkAcquireNextImageKHR under the swapchain's lock (rec_sc_lock: frame generation's present thread acquires and
+// presents on it too - fgq). A long wait is made in 2 ms slices, the lock let go between them: held across a wait for
+// the display, it kept the generated frame from its present for up to a frame - late, the opposite of its purpose.
+static VkResult sc_acquire(uint64_t timeout, VkSemaphore sem, uint32_t *image) {
+    uint64_t end = timeout == UINT64_MAX ? UINT64_MAX : plat_now_ns() + timeout;
+    for (;;) {
+        uint64_t now = plat_now_ns(), t = !timeout ? 0 : end - now < 2000000ull ? end - now : 2000000ull;
+        rec_sc_lock();
+        VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, t, sem, VK_NULL_HANDLE, image);
+        rec_sc_unlock();
+        if ((r != VK_TIMEOUT && r != VK_NOT_READY) || !timeout || plat_now_ns() >= end) return r;
+    }
+}
+
 static bool vk_frame_begin_to(const float clear[4], uint64_t timeout) {
     cur_frame.ok = false;
     if (rq_stopping()) return false;  // quitting: no window image after the window closed (#40)
@@ -1133,15 +1170,15 @@ static bool vk_frame_begin_to(const float clear[4], uint64_t timeout) {
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
     WAITING_AT(0, vk_wait_seq(slot_seq[slot]));
     VkResult r;
-    WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, timeout, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image));
+    WAITING_AT(1, r = sc_acquire(timeout, acquire_sem[slot], &cur_frame.image));
     if (timeout && r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
-        WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, timeout, acquire_sem[slot], VK_NULL_HANDLE,
-                                          &cur_frame.image));
+        WAITING_AT(1, r = sc_acquire(timeout, acquire_sem[slot], &cur_frame.image));
     }
     if (r == VK_TIMEOUT || r == VK_NOT_READY) return false;  // (best-effort caller: no free window image right now)
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("[vk] acquire failed: %d\n", r); return false; }
     cur_frame.acquired = acquire_sem[slot];
+    cur_frame.off = -1;
     cur_frame.id++;
     cur_frame.secondary = cur_frame.based = false;
     slot_seq[slot] = vk_pending_seq();
@@ -1175,7 +1212,7 @@ void vk_frame_resume(void) {
     if (!cur_frame.ok) return;
     cur_frame.secondary = false;
     VkCommandBuffer cb = vk_cmd();
-    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[cur_frame.image],
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = frame_view(),
                                     .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                     .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, g_vk.sc_extent}, .layerCount = 1,
@@ -1295,7 +1332,7 @@ void vk_overlay_end(void *window_cmd, void *cmd) {
     ov_open = VK_NULL_HANDLE;
     VK_CHECK(vkEndCommandBuffer(sec));
     rec_CmdEndRendering(cb);
-    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[cur_frame.image],
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = frame_view(),
                                     .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                     .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
@@ -1313,7 +1350,7 @@ void vk_overlay_end(void *window_cmd, void *cmd) {
 void vk_overlay_replay(VkCommandBuffer cb) {
     if (!ov_last || !cur_frame.ok) return;
     rec_CmdEndRendering(cb);
-    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[cur_frame.image],
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = frame_view(),
                                     .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                     .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
@@ -1541,6 +1578,242 @@ static void hdr_shot_report(const void *px) {
     free(out);
 }
 
+// ---- fgq: frame generation's frame on a compute queue, half a game frame after the game's on screen
+// gamescope shows a frame once its GPU work is done. The generated frame, presented from the game's queue, finished right
+// behind the game frame (~21 ms of GPU at 30 fps on a Steam Deck) - whenever its present was made - so both arrived at
+// once and only the second was shown: MangoHUD counted 60, its graph a 0.3 / 34 ms zig-zag, the game looked 30. The
+// one graphics queue can't run it later without stalling the next game frame's work. So the generated frame is drawn
+// right after the game's (the game's queue, as before, but into an image of its own the window's size: fgq[k]), and a
+// thread of its own waits for the game frame's GPU work to finish, sleeps half a game frame (the measured interval
+// between those finishes), takes a window image, copies fgq[k] into it on a compute queue - beside the next game
+// frame's rendering - and presents it from there. If the game's next frame was presented first, the generated one is
+// dropped (never shown out of order). Needs a compute-only queue family that can present (g_vk.cqueue), and SDR (HDR
+// encodes the window image: the old path then). LARECOMP_FG_QUEUE=0: off (at startup); [fg] queue lines in the log.
+#define FGQ 3
+typedef struct {
+    VkImage img; VmaAllocation mem; VkImageView view; uint32_t w, h; VkFormat fmt;
+    VkCommandPool pool; VkCommandBuffer cb; VkFence fence; VkSemaphore acq;
+    _Atomic int state;  // 0 free, 1 drawn / waiting for the thread, 2 submitted on the compute queue (fence)
+} FgSlot;
+static FgSlot fgq[FGQ];
+static VkSemaphore fgq_done[8];  // (per window image: the present's wait, as done_sem)
+typedef struct { int k; uint64_t real_seq, g_seq, presents; VkSwapchainKHR sc; } FgJob;
+static FgJob fgq_jobs[4];
+static int fgq_head, fgq_tail, fgq_next;
+static pthread_mutex_t fgq_mu = PTHREAD_MUTEX_INITIALIZER, fgq_run = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t fgq_cv = PTHREAD_COND_INITIALIZER;
+static bool fgq_started;
+static uint64_t fgq_real_seq;  // (T) the game frame's present submission, for the generated frame drawn next
+static VkImageView fgq_view_of(int k) { return fgq[k].view; }
+
+static bool fgq_usable(void) { return g_vk.cqueue && !g_vk.hdr; }
+
+static bool fgq_image(int k) {  // (T, slot free on both queues) fgq[k] at the window's size and format
+    FgSlot *f = &fgq[k];
+    if (f->img && (f->w != g_vk.sc_extent.width || f->h != g_vk.sc_extent.height || f->fmt != g_vk.sc_format)) {
+        vkDestroyImageView(g_vk.dev, f->view, NULL);
+        vmaDestroyImage(g_vk.vma, f->img, f->mem);
+        f->img = VK_NULL_HANDLE;
+    }
+    if (!f->img) {
+        uint32_t fams[2] = {g_vk.qfam, g_vk.cqfam};
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = g_vk.sc_format,
+                                .extent = {g_vk.sc_extent.width, g_vk.sc_extent.height, 1}, .mipLevels = 1, .arrayLayers = 1,
+                                .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                .sharingMode = VK_SHARING_MODE_CONCURRENT, .queueFamilyIndexCount = 2, .pQueueFamilyIndices = fams};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateImage(g_vk.vma, &ci, &ai, &f->img, &f->mem, NULL) != VK_SUCCESS) { f->img = VK_NULL_HANDLE; return false; }
+        VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = f->img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                    .format = g_vk.sc_format, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        if (vkCreateImageView(g_vk.dev, &vi, NULL, &f->view) != VK_SUCCESS) {
+            vmaDestroyImage(g_vk.vma, f->img, f->mem);
+            f->img = VK_NULL_HANDLE;
+            return false;
+        }
+        f->w = g_vk.sc_extent.width, f->h = g_vk.sc_extent.height, f->fmt = g_vk.sc_format;
+    }
+    if (!f->pool) {
+        VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+                                      .queueFamilyIndex = g_vk.cqfam};
+        VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandBufferCount = 1};
+        VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (vkCreateCommandPool(g_vk.dev, &pi, NULL, &f->pool) != VK_SUCCESS) { f->pool = VK_NULL_HANDLE; return false; }
+        ai.commandPool = f->pool;
+        VK_CHECK(vkAllocateCommandBuffers(g_vk.dev, &ai, &f->cb));
+        VK_CHECK(vkCreateFence(g_vk.dev, &fi, NULL, &f->fence));
+        f->acq = binary_semaphore();
+    }
+    return true;
+}
+
+// (T) Begin the generated frame in a free fgq image (cleared to `clear`); false: none free (dropped) or not usable here
+static bool vk_frame_begin_offscreen(const float clear[4]) {
+    cur_frame.ok = false;
+    if (!fgq_usable() || rq_stopping() || !g_vk.swapchain) return false;
+    int k = fgq_next;
+    if (atomic_load(&fgq[k].state) == 2 && vkGetFenceStatus(g_vk.dev, fgq[k].fence) == VK_SUCCESS) atomic_store(&fgq[k].state, 0);
+    if (atomic_load(&fgq[k].state) != 0 || !fgq_image(k)) return false;
+    fgq_next = (k + 1) % FGQ;
+    atomic_store(&fgq[k].state, 1);
+    cur_frame.off = k, cur_frame.acquired = VK_NULL_HANDLE;
+    cur_frame.id++;
+    cur_frame.secondary = cur_frame.based = false;
+    VkCommandBuffer cb = vk_cmd();
+    image_barrier(cb, fgq[k].img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = fgq[k].view,
+                                    .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                    .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                                    .clearValue.color.float32 = {clear[0], clear[1], clear[2], clear[3]}};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, g_vk.sc_extent}, .layerCount = 1,
+                          .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    rec_CmdBeginRendering(cb, &ri);
+    VkViewport vp = {0, 0, (float)g_vk.sc_extent.width, (float)g_vk.sc_extent.height, 0, 1};
+    VkRect2D sc = {{0, 0}, g_vk.sc_extent};
+    rec_CmdSetViewport(cb, 0, 1, &vp);
+    rec_CmdSetScissor(cb, 0, 1, &sc);
+    cur_frame.ok = true;
+    return true;
+}
+
+// (the [fg] queue line, over ~120 generated frames)
+static uint64_t fq_n, fq_after, fq_late, fq_order, fq_noimg, fq_lost;
+
+void renderer_submit(void);  // (exec.c)
+static void fgq_drop(int k) { atomic_store(&fgq[k].state, 0); }
+
+static void fgq_do(const FgJob *j) {  // (the thread, holding fgq_run)
+    static uint64_t last_r, iv;  // the last game frame's GPU finish; the interval between those (smoothed)
+    FgSlot *f = &fgq[j->k];
+    VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_vk.timeline,
+                              .pValues = &j->real_seq};
+    if (vkWaitSemaphores(g_vk.dev, &wi, 200000000ull) != VK_SUCCESS) { fq_lost++, fgq_drop(j->k); return; }
+    uint64_t r = plat_now_ns();
+    if (last_r && r - last_r < 200000000ull) iv = iv ? (iv * 7 + (r - last_r)) / 8 : r - last_r;
+    last_r = r;
+    uint64_t gap = iv / 2 > 50000000ull ? 50000000ull : iv / 2;
+    wi.pValues = &j->g_seq;  // (its own drawing: normally done long before)
+    if (vkWaitSemaphores(g_vk.dev, &wi, 200000000ull) != VK_SUCCESS) { fq_lost++, fgq_drop(j->k); return; }
+    if (r + gap > plat_now_ns()) plat_sleep_until_ns(r + gap);
+    else fq_late++;
+    // its game frame presented first (the recorder's: normally long done - its GPU work finished before this woke)
+    for (int i = 0; i < 50 && rec_presents_done() < j->presents; i++) plat_sleep_until_ns(plat_now_ns() + 1000000);
+    rec_sc_lock();
+    if (j->sc != g_vk.swapchain || rec_presents_done() > j->presents) {  // (the game's next frame went first)
+        rec_sc_unlock();
+        fq_order++, fgq_drop(j->k);
+        return;
+    }
+    uint32_t img;
+    VkResult ar = vkAcquireNextImageKHR(g_vk.dev, j->sc, 0, f->acq, VK_NULL_HANDLE, &img);
+    if ((ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) || img >= 8) {
+        rec_sc_unlock();
+        fq_noimg++, fgq_drop(j->k);
+        return;
+    }
+    if (!fgq_done[img]) fgq_done[img] = binary_semaphore();
+    VkImage dst = g_vk.sc_images[img];
+    vkResetCommandPool(g_vk.dev, f->pool, 0);
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    vkBeginCommandBuffer(f->cb, &bi);
+    VkImageMemoryBarrier2 b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+                               .dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                               .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .image = dst,
+                               .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                               .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b};
+    vkCmdPipelineBarrier2(f->cb, &di);
+    VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                     .extent = {f->w, f->h, 1}};
+    vkCmdCopyImage(f->cb, f->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    b.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    b.dstStageMask = VK_PIPELINE_STAGE_2_NONE, b.dstAccessMask = 0;
+    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    vkCmdPipelineBarrier2(f->cb, &di);
+    vkEndCommandBuffer(f->cb);
+    // waits: the window image, and the generated frame's drawing on the game's queue (the timeline: the cross-queue
+    // dependency, though the host saw it done)
+    VkSemaphoreSubmitInfo w[2] = {{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = f->acq, .stageMask = VK_PIPELINE_STAGE_2_COPY_BIT},
+                                  {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = g_vk.timeline, .value = j->g_seq,
+                                   .stageMask = VK_PIPELINE_STAGE_2_COPY_BIT}};
+    VkSemaphoreSubmitInfo sg = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = fgq_done[img],
+                                .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+    VkCommandBufferSubmitInfo cbs = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = f->cb};
+    VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = 2, .pWaitSemaphoreInfos = w,
+                        .commandBufferInfoCount = 1, .pCommandBufferInfos = &cbs, .signalSemaphoreInfoCount = 1, .pSignalSemaphoreInfos = &sg};
+    vkResetFences(g_vk.dev, 1, &f->fence);
+    VkResult sr = vkQueueSubmit2(g_vk.cqueue, 1, &si, f->fence);
+    if (sr == VK_ERROR_DEVICE_LOST) { rec_sc_unlock(); vk_device_fault_report(); FATAL("[fg] queue submission: device lost\n"); }
+    if (sr != VK_SUCCESS) {  // (nothing submitted: no present - its semaphore would never be signalled; the slot is free)
+        rec_sc_unlock();
+        static int n;
+        if (n++ < 10) LOG("[fg] queue: submission failed: %d\n", sr);
+        fq_lost++, fgq_drop(j->k);
+        return;
+    }
+    atomic_store(&f->state, 2);
+    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &fgq_done[img],
+                           .swapchainCount = 1, .pSwapchains = &j->sc, .pImageIndices = &img};
+    VkResult pr = vkQueuePresentKHR(g_vk.cqueue, &pi);
+    rec_sc_unlock();
+    if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR && pr != VK_ERROR_OUT_OF_DATE_KHR) {
+        static int n;
+        if (n++ < 10) LOG("[fg] queue: present failed: %d\n", pr);
+    }
+    fq_n++, fq_after += plat_now_ns() - r;
+    if (fq_n >= 120) {
+        LOG("[fg] queue: generated frames presented %.1f ms after their game frame finished (half of %.1f ms asked); "
+            "%llu late, dropped %llu (game frame first) / %llu (no window image) / %llu (GPU wait)\n", fq_after / 1e6 / fq_n,
+            iv / 1e6, (unsigned long long)fq_late, (unsigned long long)fq_order, (unsigned long long)fq_noimg, (unsigned long long)fq_lost);
+        fq_n = fq_after = fq_late = fq_order = fq_noimg = fq_lost = 0;
+    }
+}
+
+static int fgq_thread(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&fgq_mu);
+        while (fgq_head == fgq_tail) pthread_cond_wait(&fgq_cv, &fgq_mu);
+        FgJob j = fgq_jobs[fgq_tail % 4];
+        pthread_mutex_lock(&fgq_run);  // (taken before the job leaves the queue: fgq_drain sees it either queued or running)
+        fgq_tail++;
+        pthread_mutex_unlock(&fgq_mu);
+        fgq_do(&j);
+        pthread_mutex_unlock(&fgq_run);
+    }
+    return 0;
+}
+
+// (T) After the generated frame's drawing was submitted: hand it to the thread
+static void fgq_push(int k, uint64_t real_seq, uint64_t g_seq) {
+    if (!fgq_started) {
+        fgq_started = true;
+        SDL_Thread *t = SDL_CreateThread(fgq_thread, "fgpresent", NULL);
+        if (t) SDL_DetachThread(t);
+        LOG("[fg] queue: the generated frame is presented from a compute queue, half a game frame after the game's\n");
+    }
+    pthread_mutex_lock(&fgq_mu);
+    if (fgq_head - fgq_tail >= 4) { pthread_mutex_unlock(&fgq_mu); fgq_drop(k); return; }  // (the thread is behind: drop it)
+    fgq_jobs[fgq_head++ % 4] = (FgJob){k, real_seq, g_seq, rec_presents_queued(), g_vk.swapchain};
+    pthread_cond_signal(&fgq_cv);
+    pthread_mutex_unlock(&fgq_mu);
+}
+
+// (T) No generated frame queued or in flight on the compute queue - before vkDeviceWaitIdle / a new swapchain (the
+// queues and the swapchain then are this thread's alone): pending ones are dropped, the running one finishes
+static void fgq_drain(void) {
+    if (!fgq_started) return;
+    pthread_mutex_lock(&fgq_mu);
+    while (fgq_head != fgq_tail) fgq_drop(fgq_jobs[fgq_tail++ % 4].k);
+    pthread_mutex_unlock(&fgq_mu);
+    pthread_mutex_lock(&fgq_run);
+    pthread_mutex_unlock(&fgq_run);
+    if (g_vk.cqueue) vkQueueWaitIdle(g_vk.cqueue);
+    for (int k = 0; k < FGQ; k++)
+        if (atomic_load(&fgq[k].state) == 2) atomic_store(&fgq[k].state, 0);
+}
+
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 uint64_t renderer_present_count(void);
 void vk_frame_end(const char *shot_path) {
@@ -1558,6 +1831,16 @@ void vk_frame_end(const char *shot_path) {
     }
     VkCommandBuffer cb = vk_cmd();
     rec_CmdEndRendering(cb);
+    if (cur_frame.off >= 0) {  // frame generation's frame, in an image of its own: submitted, then the thread's (fgq)
+        int k = cur_frame.off;
+        image_barrier(cb, fgq[k].img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        extern bool g_vk_submit_untimed;
+        g_vk_submit_untimed = true;  // (not the game's GPU work: dynamic resolution's budget leaves it out)
+        renderer_submit();
+        cur_frame.ok = false, cur_frame.off = -1;
+        fgq_push(k, fgq_real_seq, renderer_issued_seq());
+        return;
+    }
     VkSpan shot = {0};
     if (shot_path) save_window_image(cb, &shot);
     if (g_vk.hdr) {  // the SDR image drawn -> the window's HDR image
@@ -1907,6 +2190,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         bool shot = win_shot && (long)frame + 1 == win_shot;
         vk_frame_end(shot ? "build/window.png" : NULL);
+        fgq_real_seq = renderer_issued_seq();  // (the game frame's present submission: fgq waits for it to finish)
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) exit_after_shot();
         if (vk_fg_image && vk_fg_frame == frame) {  // frame generation: the generated frame, after the game's own
             static const float black2[4] = {0, 0, 0, 1};
@@ -1935,18 +2219,28 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 const char *e = getenv("LARECOMP_FG_MID");
                 mid = e ? (!strcmp(e, "half") ? -3 : atol(e) > 0 ? atol(e) : -1) : rec_on() ? -3 : -1;
             }
-            if (!rec_on() && mid != -1)
-                plat_sleep_until_ns(plat_now_ns() + (mid == -3 ? 16666667ull * (uint64_t)iv / 2 : (uint64_t)mid));
-            if (vk_frame_begin_to(black2, 0)) {  // (best effort: no free window image now -> drop the generated frame)
-                VkCommandBuffer cb2 = vk_cmd();
-                vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);
-                extern void vk_overlay_replay(VkCommandBuffer cb);
-                vk_overlay_replay(cb2);  // (the FPS counter / menu the game's own frame drew, or they flicker)
-                // (the gap is this present's only: set here, after the acquire, so a dropped generated frame can't
-                // hand it to the game's next one)
-                if (rec_on() && mid != -1) rec_next_present_gap(mid == -3 ? 1 : (uint64_t)mid);
-                vk_frame_end(NULL);
-            } else fg_dropped++;
+            if (fgq_usable()) {  // (its own queue and present thread: on time on screen - fgq)
+                if (vk_frame_begin_offscreen(black2)) {
+                    VkCommandBuffer cb2 = vk_cmd();
+                    vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);
+                    extern void vk_overlay_replay(VkCommandBuffer cb);
+                    vk_overlay_replay(cb2);
+                    vk_frame_end(NULL);
+                } else fg_dropped++;
+            } else {  // (the game's queue, the gap on the recorder: the generated frame finishes with the game's)
+                if (!rec_on() && mid != -1)
+                    plat_sleep_until_ns(plat_now_ns() + (mid == -3 ? 16666667ull * (uint64_t)iv / 2 : (uint64_t)mid));
+                if (vk_frame_begin_to(black2, 0)) {  // (best effort: no free window image now -> drop the generated frame)
+                    VkCommandBuffer cb2 = vk_cmd();
+                    vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);
+                    extern void vk_overlay_replay(VkCommandBuffer cb);
+                    vk_overlay_replay(cb2);  // (the FPS counter / menu the game's own frame drew, or they flicker)
+                    // (the gap is this present's only: set here, after the acquire, so a dropped generated frame can't
+                    // hand it to the game's next one)
+                    if (rec_on() && mid != -1) rec_next_present_gap(mid == -3 ? 1 : (uint64_t)mid);
+                    vk_frame_end(NULL);
+                } else fg_dropped++;
+            }
         }
         // (overlap) the game's frame ends here, with the generated frame's present when there is one: a fence the
         // game places right after presenting is this item's, so it resolves to this last submission
@@ -2148,6 +2442,7 @@ void backend_quit(void) {
     if (trace) LOG("[vk] quit: stopping the recorder\n");
     rec_quit();  // (what it still had is dropped, not run: no submission or present after this; the queue idle for the wait)
     if (!g_vk.dev) return;
+    fgq_drain();
     if (trace) LOG("[vk] quit: waiting for the GPU\n");
     vkDeviceWaitIdle(g_vk.dev);
     if (trace) LOG("[vk] quit: saving the pipeline cache\n");
@@ -2211,6 +2506,7 @@ void backend_reset(void) {
     if (!g_vk.dev) return;
     rq_drain();  // (the render thread: everything queued ran; it idles while the game is down)
     rec_drain();  // (the recorder: everything the render thread queued is recorded and submitted)
+    fgq_drain();
     vkDeviceWaitIdle(g_vk.dev);
     extern void vk_textures_reset(void);
     extern void vk_exec_reset(void);
