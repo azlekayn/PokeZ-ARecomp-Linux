@@ -250,3 +250,30 @@ swapchain / reset pacing on focus gain (the port's present-watch already does th
   `LARECOMP_DATA_ROOT`/`LARECOMP_SETTINGS` to the bundle's `data/`, the RADV fix, and
   `APPIMAGE_EXTRACT_AND_RUN=1` when there is no `/dev/fuse`. `data/larecomp.ini` is Deck-tuned
   (`operation_mode=auto`, `fps60=0`, `frame_dt=1`, `framegen=0`, effects off).
+
+## v0.1.11 fork + Deck findings (2026-10-29)
+- Ported our Linux work onto upstream **v0.1.11** (tag cff8364): branch **`linux`** = v0.1.11 + frame gen + `frame_dt`
+  decouple + settings/F1 rows + FSR2 Linux build fixes; 3-way applied our 677-line delta, only `settings.h`/`menu.mm`
+  conflicted (kept both, against upstream's new **Compatibility** page). Published as **PokeZ-ARecomp-Linux** on
+  GitHub (`azlekayn/PokeZ-ARecomp-Linux`, branch `main`) and GitLab (`gitlab.com/azlekayn/PokeZ-ARecomp-Linux`).
+- **Per-frame cost is the wall**: uncapped ~44 fps (`~22 ms`); the CPU/GPU **overlap** is the lever (44 -> 51, GPU
+  30% -> 85%, F1 > Compatibility > CPU/GPU overlap = On or `LARECOMP_GPU_OVERLAP=1`). It needs the write watch, which
+  the **userptr heap** (our RADV fix `LARECOMP_VK_HEAP_DMABUF=0`) turns off - upstream #181. Made the no-watch fallback
+  **always copy** storage ranges (`exec.c` RS_PROBE -> RS_COPY, crash-2's torn instance count) - fixed that, **still
+  device-lost after ~90 s**: the remaining race is **vertex/index**, which the vertex cache can't protect without the
+  watch. So overlap on = ~51 fps **but not shippable**.
+- **Frame gen**: presents the generated frame back-to-back with the game's -> gamescope coalesces (min 0.3 ms / max
+  34 ms pairs) -> still 30 fps look. Spacing it half a game frame (`device.c`, `LARECOMP_FG_MID=half|<ns>`) is
+  **opt-in**, off by default: on the Deck it sleeps the render thread (`~24 ms` work in a 33 ms frame) -> 30 -> 25 fps.
+  Only helps where the per-frame cost leaves ~half a frame free.
+- **`frame_dt` decouple**: works in the game's **30 fps mode** (dt 34 ms -> step 1 -> world 2/frame = full speed).
+  In **60 fps mode** the frame clock ignores the reported duration (`[frameclock+0x21] == 0` -> takes `configured`),
+  so it steps 1/60 s/frame and slow-motions below 60. Tried forcing the measured branch (`za_patches.py`, load 1 for
+  the flag compare): **over-corrected (double speed) and made the game's controller flip 60/30 modes** - reverted.
+  Correct fix: override the **final per-subsystem step** (`mov w2, w20` in `f_7001b29660`'s update loop), leaving the
+  mode logic alone. Validate on the PC (screenshot-distance A/B) before a Deck recompile.
+- **Deck stable config** (set in its `data/larecomp.ini`): `fps60=0` (30 fps Switch, decouple gives full speed),
+  `gpu_overlap=off` (no crashes), `framegen=0`, `dynamic_res=off`, `resolution=1x`. Also `run.sh` keeps the RADV fix
+  (`HEAP_DMABUF=0` + `GMEM_WINDOW=256`) - commenting it out black-screens/crashes the Deck.
+- Slow drift seen (`30.4 -> 28.9` over 9 min) with `cached ~18000 MB host` on a 15 GB Deck (memory pressure), plus
+  thermal. Separate from the above.
