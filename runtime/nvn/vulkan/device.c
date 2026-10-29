@@ -377,7 +377,7 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[16];
+    const char *ext[32];  // (up to ~23 below, each optional: 16 overflowed on a driver offering most of them)
     uint32_t n_ext = 0;
     // Vulkan 1.2: the 1.3 features the driver has as extensions. LARECOMP_VK_COMPAT=1 takes none of them (the compat.c
     // ways), =<names> only leaves out those: rendering, sync, eds, eds2 (e.g. =sync)
@@ -438,6 +438,12 @@ static void create_device(void) {
     // Whether the window really shows the frames presented (present_watch). LARECOMP_NO_PRESENT_WATCH=1: not checked
     bool x_pw = !ENV("LARECOMP_NO_PRESENT_WATCH") && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
                 has_ext(ep, ne, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+    // When the display really showed each frame, and "not before" times (record.c: frame generation's frame half a
+    // game frame after the game's on screen). Opt-in, LARECOMP_DISPLAY_TIMING=1: gamescope's layer lists it on a Steam
+    // Deck, but with it enabled the first submission after the start screen crashed inside RADV (which doesn't list it
+    // itself) - every launch, 2026-10-29.
+    const char *dte = ENV("LARECOMP_DISPLAY_TIMING");
+    bool x_dt = dte && atoi(dte) && has_ext(ep, ne, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
@@ -470,6 +476,7 @@ static void create_device(void) {
     if (x_rb2) ext[n_ext++] = VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
     x_pw = x_pw && have_pid.presentId && have_pw.presentWait;
     if (x_pw) ext[n_ext++] = VK_KHR_PRESENT_ID_EXTENSION_NAME, ext[n_ext++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME;
+    if (x_dt) ext[n_ext++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
     if (!have12.shaderOutputLayer) LOG("[vk] warning: no shaderOutputLayer (vertex shaders choosing the render target layer)\n");
     {   // what the driver offers for building pipelines (one line, for #92 reports)
         VkPhysicalDeviceDriverProperties drv = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
@@ -681,6 +688,9 @@ static void create_device(void) {
     LOG("[vk] robust buffer / image access 2: %s\n", x_rb2 ? "yes" : "no");
     g_present_wait = x_pw ? (PFN_vkWaitForPresentKHR)vkGetDeviceProcAddr(g_vk.dev, "vkWaitForPresentKHR") : NULL;
     LOG("[vk] present watch: %s\n", g_present_wait ? "yes" : "no (no VK_KHR_present_wait)");
+    rec_display_timing_init(x_dt ? (PFN_vkGetPastPresentationTimingGOOGLE)vkGetDeviceProcAddr(g_vk.dev,
+                                                                                           "vkGetPastPresentationTimingGOOGLE") : NULL);
+    LOG("[vk] display timing: %s\n", x_dt ? "yes (VK_GOOGLE_display_timing)" : "no");
 
     // (VMA's commands from the driver too, as above)
     VmaVulkanFunctions vf = {.vkGetInstanceProcAddr = vkGetInstanceProcAddr, .vkGetDeviceProcAddr = vkGetDeviceProcAddr};
@@ -1045,6 +1055,7 @@ static VkCommandBuffer ov_cb[FRAMES];
 static uint64_t ov_seq[FRAMES], ov_frame[FRAMES];  // the submission that executed the slot's buffer; the frame it was for
 static VkCommandBuffer ov_open;                    // (handed out by vk_overlay_begin, until vk_overlay_end)
 static VkCommandBuffer ov_last;                    // (vk_overlay_end) this frame's overlay, replayed on the generated frame
+static int ov_last_slot;                           // (the slot ov_last was recorded in: its pool must outlive the replay too)
 static int ov_direct = -1;
 
 static bool ov_slot_ready(void) {  // (the slot's pool and buffer exist, and the buffer is free to record)
@@ -1087,7 +1098,8 @@ void *vk_overlay_begin(void *window_cmd) {
                                                   .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
     VkCommandBufferInheritanceInfo ii = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO, .pNext = &ir};
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT | VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT,
+                                   // (not ONE_TIME_SUBMIT: frame generation executes it a second time, on the generated frame)
+                                   .flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT,
                                    .pInheritanceInfo = &ii};
     VK_CHECK(vkBeginCommandBuffer(ov_cb[slot], &bi));
     ov_frame[slot] = cur_frame.id;
@@ -1110,7 +1122,7 @@ void vk_overlay_end(void *window_cmd, void *cmd) {
     rec_CmdExecuteCommands(cb, 1, &sec);
     cur_frame.secondary = true;
     ov_seq[slot] = vk_pending_seq();  // (the submission window_cmd goes in)
-    ov_last = sec;                    // (the generated frame draws it too; backend_present_now clears it each frame)
+    ov_last = sec, ov_last_slot = slot;  // (the generated frame draws it too; backend_present_now clears it each frame)
 }
 
 // The generated frame (frame generation) draws the game image but none of ImGui's overlay, so the FPS counter and the
@@ -1126,6 +1138,7 @@ void vk_overlay_replay(VkCommandBuffer cb) {
                           .renderArea = {{0, 0}, g_vk.sc_extent}, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca};
     rec_CmdBeginRendering(cb, &ri);
     rec_CmdExecuteCommands(cb, 1, &ov_last);
+    ov_seq[ov_last_slot] = vk_pending_seq();  // (the replay's submission is the buffer's last use: the slot's pool is reset after it, not after the game frame's)
 }
 
 static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
@@ -1703,21 +1716,48 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) exit_after_shot();
         if (vk_fg_image && vk_fg_frame == frame) {  // frame generation: the generated frame, after the game's own
             static const float black2[4] = {0, 0, 0, 1};
-            static uint64_t nfg;
+            static uint64_t nfg, fg_dropped;
             static int fglog = -1;
             if (fglog < 0) fglog = getenv("LARECOMP_FG_LOG") != NULL;
             if (nfg < 6 || (fglog && frame % 300 == 0)) {
                 nfg++;
-                LOG("[fg] presenting the generated frame %llu\n", (unsigned long long)frame);
+                LOG("[fg] presenting the generated frame %llu (%llu dropped so far: no free window image)\n",
+                    (unsigned long long)frame, (unsigned long long)fg_dropped);
             }
+            // Space the generated frame half a game frame after the game's own present. Presented back-to-back (both
+            // in one refresh) a mailbox / gamescope compositor keeps only the last of the two, so the game stays at
+            // its own rate - a 30 fps game with frame generation on still looked 30 fps (measured on a Steam Deck:
+            // the two presents arrived ~0.3 ms apart, a whole game frame apart from the next pair; MangoHUD counted
+            // 60). Half a game frame later puts the generated frame on the refresh between two game frames: a 60 Hz
+            // display then shows a real 60. The recorder thread waits for it (record.c present_gap_wait: half the
+            // measured interval between the game's presents), not this one: sleeping the render thread, ~24 ms of
+            // work in the Deck's 33 ms frame, cost 30 -> 25 fps. Without the recorder (LARECOMP_VK_RECORDER=0) this
+            // thread would sleep, so it's off there unless asked for. LARECOMP_FG_MID=0: off (back-to-back, as
+            // before); =half: half a game frame; =<ns>: that gap.
+            extern int g_out_present_interval;  // (objects.c present_pace: the game's present interval)
+            int iv = g_out_present_interval >= 1 && g_out_present_interval <= 4 ? g_out_present_interval : 1;
+            static long mid = -2;  // (-2: unset, -1: off, -3: half a game frame)
+            if (mid == -2) {
+                const char *e = getenv("LARECOMP_FG_MID");
+                mid = e ? (!strcmp(e, "half") ? -3 : atol(e) > 0 ? atol(e) : -1) : rec_on() ? -3 : -1;
+            }
+            if (!rec_on() && mid != -1)
+                plat_sleep_until_ns(plat_now_ns() + (mid == -3 ? 16666667ull * (uint64_t)iv / 2 : (uint64_t)mid));
             if (vk_frame_begin_to(black2, 0)) {  // (best effort: no free window image now -> drop the generated frame)
                 VkCommandBuffer cb2 = vk_cmd();
                 vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);
                 extern void vk_overlay_replay(VkCommandBuffer cb);
                 vk_overlay_replay(cb2);  // (the FPS counter / menu the game's own frame drew, or they flicker)
+                // (the gap is this present's only: set here, after the acquire, so a dropped generated frame can't
+                // hand it to the game's next one)
+                if (rec_on() && mid != -1) rec_next_present_gap(mid == -3 ? 1 : (uint64_t)mid);
                 vk_frame_end(NULL);
-            }
+            } else fg_dropped++;
         }
+        // (overlap) the game's frame ends here, with the generated frame's present when there is one: a fence the
+        // game places right after presenting is this item's, so it resolves to this last submission
+        extern void vk_overlap_frame_end(void);
+        vk_overlap_frame_end();
     } else {
         renderer_submit();
     }
