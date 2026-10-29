@@ -353,10 +353,12 @@ static const char *builtin_src(const char *name, int *stage) {
                "  rx = (s & 0xF0u) == 0x30u ? u.react.x : s == 2u ? u.react.y : 0.0;\n"
                "}\n";
     }
-    // Frame generation (LARECOMP_FRAMEGEN; exec.c vk_fg_build): the frame between the last two, from their colour and
-    // the scene's motion vectors (fsr2_mv.frag above). A pixel at p now was at p + mv a frame ago, so the middle frame
-    // samples each side half way; where the motion vectors are ~0 (the HUD, menus, a cut) both samples are this frame,
-    // so nothing smears there.
+    // Frame generation (LARECOMP_FRAMEGEN; exec.c vk_fg_build): half a frame after the current one, from its colour
+    // and the scene's motion vectors (fsr2_mv.frag above). A pixel at p now was at p + mv a frame ago, so half a frame
+    // on it is at p - mv/2: the generated frame samples the current one at q + mv/2 (extrapolated - par.z 0). It is
+    // shown after the game's frame (device.c fgq), so the frame between the last two (par.z 1, LARECOMP_FG_MODE=interp)
+    // went half a step back each time: N, N-1/2, N+1, N+1/2 - on a Steam Deck it still looked 30 fps once the two were
+    // spaced on screen. Where the motion vectors are ~0 (the HUD, menus, a cut) the current frame is shown as it is.
     if (!strcmp(name, "fg_interp.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
@@ -373,8 +375,12 @@ static const char *builtin_src(const char *name, int *stage) {
                // the exact current frame is shown - sharp, and the UI can't flicker. par.y scales the effect down.
                "  float t = pc.par.x > 0.0 ? clamp(length(mvp) / pc.par.x, 0.0, 1.0) * pc.par.y : pc.par.y;\n"
                "  vec2 m = mvp * pc.sz.xy;\n"
-               "  vec3 mid = mix(texture(cur, uv - 0.5 * m).rgb, texture(prev, uv + 0.5 * m).rgb, 0.5);\n"
+               "  vec3 mid = pc.par.z > 0.5 ? mix(texture(cur, uv - 0.5 * m).rgb, texture(prev, uv + 0.5 * m).rgb, 0.5)\n"
+               "                            : texture(cur, uv + 0.5 * m).rgb;\n"
                "  o = vec4(mix(curc, mid, t), 1.0);\n"
+               // (par.w 1: LARECOMP_FG_DUMP's picture of the motion: x, y in red, green - grey 0.5 = none, +-32 px the
+               // range - and blue where it is over the threshold, i.e. where the generated frame differs)
+               "  if (pc.par.w > 0.5) o = vec4(clamp(mvp / 64.0 + 0.5, 0.0, 1.0), t > 0.0 ? 1.0 : 0.0, 1.0);\n"
                "}\n";
     }
     // ---- post passes before the present (Video tab "Anti-aliasing" / "Upscaler"): exec.c vk_present_draw.
