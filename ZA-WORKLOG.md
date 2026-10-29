@@ -277,3 +277,45 @@ swapchain / reset pacing on focus gain (the port's present-watch already does th
   (`HEAP_DMABUF=0` + `GMEM_WINDOW=256`) - commenting it out black-screens/crashes the Deck.
 - Slow drift seen (`30.4 -> 28.9` over 9 min) with `cached ~18000 MB host` on a 15 GB Deck (memory pressure), plus
   thermal. Separate from the above.
+
+## Deck performance: it is LATENCY-bound, not clock/workload (2026-10-29 pm)
+- Symptom (final, unambiguous): **static scene, not moving** - the game starts a run at **50-55 fps** and decays to
+  **~35 fps over ~1-2 min**, then flat; **restarting resets it**. Even a trivial view ("staring at the ground") tops
+  out at **~44 fps** -> a **fixed ~22 ms/frame floor**.
+- Eliminated by measurement (all with the game running; `perf` + sysfs via the tmux `steamdeck` root shell):
+  - **CPU clock** - governor `powersave` pinned it to 2425 MHz (max 3501); forcing `performance` -> 3475-3500 MHz ->
+    34 -> 37 fps only. Reverted.
+  - **GPU clock** - DPM parked at the middle state (1040 MHz, ~8-15 W); forcing
+    `power_dpm_force_performance_level=high` -> 1600 MHz -> **still ~44 fps**. Reverted to `auto`.
+  - **Thermal** - 65-77 C, no throttle.
+  - **Resolution/effects** - `dynamic_res = game` made no difference (the GPU is not the wall).
+  - **Workload** - on the static scene the draw count FELL (125135 -> 84248) while the fps fell.
+  - **Host cache / RAM** - plateaued ~7-8 GB, no swap (`zram` + a 16 GB swapfile, 0 used).
+- `perf record -p <pid>` on the live process (module split): **lasgame.so (the game's own recompiled code) 55.3 %**,
+  lasrecomp 20 %, kernel 13.2 % (notably `hmm_range_need_fault` / `hmm_vma_walk_pmd` - HMM page-table walks for the
+  amdgpu **userptr** heap, i.e. our RADV path - and `amdgpu_cs_ioctl`), libvulkan_radeon 5 %, vdso 2.1 %
+  (`__vdso_clock_gettime`, largely `VK_PROF`), libc 3 %. Otherwise very flat (no hot symbol > ~2 %).
+- Prof split (render thread, per frame): at 30 fps exec ~13.7 ms (draw 10.5: pre 2.6, sets 3.1, tex 2.2, key 0.5,
+  dyn 0.5, vtx 0.5) + submit 3.5 ms; recorder thread busy ~8.5 ms; ~1222-1991 draws/frame, ~69-71 passes,
+  ~1000-1500 descriptor-set writes, ~81-110 MB of command packets per 2 s, pipeline memo ~84 %. GPU span ~22-25 ms
+  (at interval 2 this includes the vsync wait, so real GPU work is far less). With overlap ON + interval 1 the GPU
+  span is ~22 ms -> the ~44-50 ceiling.
+- **NEXT PROBE (already armed in the Deck's `run.sh`): `LARECOMP_GPUPROF_AT=2000,5000,10000,13000`** - leave the game
+  on the static scene and compare the per-pass GPU ms at an early (fast) vs a late (slow) frame; the pass that grows
+  names the decay.
+- Deck `run.sh` now: RADV fix (`LARECOMP_VK_HEAP_DMABUF=0` + `LARECOMP_VK_GMEM_WINDOW=256` - load-bearing, removing it
+  black-screens/crashes the Deck), `LARECOMP_VK_PROF=1`, `LARECOMP_GPUPROF_AT=...`, `LARECOMP_FRAME_DT*` unset. Deck
+  `larecomp.ini`: `fps60=0`, `gpu_overlap=on` (the user enabled it - 44 -> 51, but it device-losts after ~90 s),
+  `framegen=0`, `frame_dt=1`, `dynamic_res=off`, `resolution=1x`.
+- **The through-line: the Deck's ~44 fps ceiling is the port's per-frame pipeline latency (~22 ms fixed), not CPU,
+  not GPU, not settings.** The overlap (defer a fence) recovers 44 -> 51; making it **safe** (vertex/index snapshots,
+  not just storage) is the main lever. Fix the pipeline's fixed ~6 ms + missed vsync (profile game -> render -> record
+  -> present at a trivial view) and it lifts every view.
+
+## Open items / next session
+1. **Mods tab**: move the "Z-A Royale randomizer" F1 row(s) from Video to a new **Mods** tab (runtime/ui/menu.mm).
+   Wait for the other session's menu.mm edits to settle.
+2. **Royale cadence**: enable the F1 toggle, play a night, grep `<data-root>/lasrecomp.log` for `[royalerandom]`;
+   repeats within a night = per-night, boot-only = add the forced Battle Zone / timer trigger.
+3. **Safe overlap** (vertex/index) and **step-override patch** (`mov w2, w20` in `f_7001b29660`'s update loop, leaving
+   the mode logic alone) - both **validate on the PC first** (screenshot-distance A/B), not by blind Deck recompiles.
