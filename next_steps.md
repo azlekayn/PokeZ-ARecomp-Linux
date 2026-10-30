@@ -507,6 +507,17 @@ or a fullscreen game nobody was watching for a hidden dialog).
     look for `snap_storage` specifically, another time, not tonight.
 
 ## Other open items
+- **Disproven 2026-10-30, don't re-chase it:** the Deck's documented slow fps drift ("cached ~18000 MB host" over
+  9 min, 30.4 -> 28.9 fps) is *not* "the vertex cache is disabled, so reads are uncached and costly." `stat_vtx_host`
+  is the free, zero-copy direct-bind path (no upload, no GPU copy - just pointing the GPU at existing memory); tried
+  widening the overlap-only hash cache (§4) to cover it unconditionally (no new env flag, per the standing rule) and
+  measured it a clear *regression* even on a discrete GPU with real PCIe bandwidth to save (steady 60 fps -> 44-49,
+  same test script, local): the CPU-side hashing this adds costs more than the bus-crossing it avoids, because the
+  direct-bind path was never actually expensive. Reverted (no commit - the working tree was already back at HEAD).
+  On the Deck specifically it would have been worse than useless regardless: `vcache_lookup` already has a deliberate
+  "integrated GPU: no bus to save, caching would only cost" exclusion (same physical RAM as the CPU), which a
+  first pass at this missed entirely. The real cause of the Deck's drift is still open - thermal, actual RAM
+  capacity pressure on a 15 GB device, or something else - just confirmed to not be this.
 - **Royale randomizer probably never fires:** `fs.c` `za_royale_read` looks for a loose `trdata_array.bin`, but
   that file is inside `arc/data.trpfs`.
 - **Unmerged reviewer branch** `worktree-agent-ad664600080292dcf`: stale (forked long before the v0.1.12 rebase -
