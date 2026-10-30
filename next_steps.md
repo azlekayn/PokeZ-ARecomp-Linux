@@ -1,5 +1,42 @@
 # ZA Recomp (Linux / Steam Deck): next steps
 
+**Our-branch-vs-upstream validation (2026-10-30, two independent reviews - start here for the night's three live
+bugs below).** The user asked whether our fork's own changes (not upstream's pre-existing code) are responsible for
+tonight's instability. Two independent reviews (this session's own code reading + a fresh agent with no shared
+context, both diffing `linux` against the `v0.1.12` merge-base and reading `fd70be0` in full) agree:
+
+1. **The VM-fault crash itself (the shadow-caster pipeline, `vh 9c1a6a0125797441 fh d4f2e43272162253`): likely
+   pre-existing/inherited, not ours.** The GPU-write-tracking machinery a shadow pass would need
+   (`vc_mark_gpu`/`vc_mark_sbufs`/`vc_page_gpu`/`vcache_lookup`) is verbatim identical to upstream's `v0.1.12` - we
+   never touched it. Confirmed independently: on the Deck's actual runtime path (`gpu_overlap` off, vertex cache off
+   on this integrated GPU - `vcache_lookup`'s own "integrated GPU: no bus to save" exclusion), `guest_direct()`'s
+   vertex/index bind (`exec.c` ~line 5579) skips `hc_lookup` and `vcache_lookup` entirely and does a bare direct
+   bind with **zero GPU-write awareness**, relying purely on barrier placement - which predates this fork and which
+   this crashed through with `gpu_overlap` off, where none of today's overlap-only code even runs. Matches upstream's
+   own independently-reported crash class (issues #39, #72).
+2. **The `gpu_overlap`-on rendering corruption (missing objects, flickering shadows): a real, previously-unflagged
+   fork-specific suspect exists, not confirmed.** `overlap_defer()` (`exec.c` ~line 700, used by `renderer_wait_seq`)
+   was rewritten by this fork in `665a201` (2026-10-29) - a full algorithm change (per-fence deferral ->
+   per-frame-boundary, `deferred_seq`/`present_seq` each going from one value to two) to fix a real Deck hitch. That
+   code decides exactly what the CPU may touch while the GPU is still working on prior frames, and until tonight it
+   had only ever been validated by 5 minutes of standing idle over SSH (no controller input possible) - never under
+   real sustained movement. This is a concrete, plausible, *untested-at-scale* candidate, independent of item 1's
+   shared/inherited bug and separate from today's `hc_lookup` fix.
+3. **The fps regression (15 fps in a 56-58k-draw scene vs. a remembered 30/50+): still unresolved, resolves to an
+   A/B nobody has run.** If `gpu_overlap` was actually active during the remembered baseline, `hc_lookup`'s per-draw
+   content-hash probe (today's new code, `fd70be0`) has only ever been exercised at a few hundred draws/frame (the
+   170 s local run, the idle Deck test) - scaling that unconfirmed cost to 56,000+ draws is a real, cheap-to-isolate
+   suspect. If overlap was actually off that whole time (very possible - see `overlap_on()`'s unconditional AMD
+   default-off below), the regression more likely belongs to the untested `v0.1.12` rebase base itself, unrelated to
+   this fork's 29 commits. Nobody has done a controlled A/B (old AppImage vs. new, same spot, same confirmed
+   `gpu_overlap` state) to tell these apart.
+- **Next real step, not done yet:** before touching code further, confirm what `gpu_overlap` actually was (the log
+  always says so at boot, `"[vk] GPU overlap on/off"`) during each of tonight's three observations (the 15 fps
+  scene, the corruption, the baseline the user remembers) - most of the uncertainty above collapses once that's
+  known for certain instead of inferred.
+
+---
+
 **State as of 2026-10-30 evening - start here.** Branch `linux` at `beb06a4`, fully committed and pushed to both
 `github` and `gitlab`. `ZA-WORKLOG.md` has the longer history. This paragraph and the next supersede the "no Deck
 access" paragraph below (same day, later session, real SSH access to the Deck this time) - read this first, then
