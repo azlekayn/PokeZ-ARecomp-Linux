@@ -478,6 +478,10 @@ static uint64_t dl_args[DL_N];
 static uint32_t dl_snap[DL_N][5];  // (those parameters when the draw was recorded)  // a GPU indirect draw's parameters (guest = host address): read back in the dump
 static unsigned dl_n;
 static int dl_on = -1;
+static bool dl_active(void) {  // (dl_note's own lazy init, exposed so a caller can skip extra work when it's off)
+    if (dl_on < 0) dl_on = ENV("LARECOMP_VK_DEVLOST_TRACE") ? atoi(ENV("LARECOMP_VK_DEVLOST_TRACE")) : 0;
+    return dl_on > 0;
+}
 static void dl_note(const char *fmt, ...) {
     if (dl_on < 0) dl_on = ENV("LARECOMP_VK_DEVLOST_TRACE") ? atoi(ENV("LARECOMP_VK_DEVLOST_TRACE")) : 0;
     if (!dl_on) return;
@@ -6734,6 +6738,20 @@ static void draw_(CmdRec *r, bool indexed) {
             if (!pp) {
                 uint64_t vh = shader_stage_hash(&st.program->stages[0]), fh = shader_stage_hash(&st.program->stages[1]);
                 shader_first_visit("pipeline", vh, fh, ph);
+                // Full detail on a first-visit pipeline whose vertex or fragment hash matches LARECOMP_DEBUG_PIPELINE_HASH
+                // (hex, e.g. b3a5396059fd6d6c): chasing a GPU hang that always hits a freshly-built pipeline near boot
+                // (2026-10-29, Steam Deck) - first visits are rare, so this is cheap to leave logging by default once set.
+                static int64_t dbg_hash = -1;
+                if (dbg_hash < 0) { const char *e = ENV("LARECOMP_DEBUG_PIPELINE_HASH"); dbg_hash = e ? (int64_t)strtoull(e, NULL, 16) : 0; }
+                if (dbg_hash && ((uint64_t)dbg_hash == vh || (uint64_t)dbg_hash == fh)) {
+                    ShaderRec drec;
+                    rec_from_state(&drec, vkey.flip_x, mode);
+                    char fmt[1024];
+                    shader_rec_format(&drec, fmt, sizeof fmt);
+                    LOG("[shader] pipeline detail (frame %llu): vh %016llx fh %016llx ph %016llx | %s\n",
+                        (unsigned long long)renderer_present_count(), (unsigned long long)vh, (unsigned long long)fh,
+                        (unsigned long long)ph, fmt);
+                }
                 if (prep_check_on()) {
                     ShaderRec rec;
                     rec_from_state(&rec, vkey.flip_x, mode);
@@ -7144,8 +7162,15 @@ static void draw_(CmdRec *r, bool indexed) {
         } else if (!use_index) rec_CmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else rec_CmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
     }
-    dl_note("draw vs %llx fs %llx%s xfb %d", (unsigned long long)st.program->stages[0].code_addr,
-            (unsigned long long)st.program->stages[1].code_addr, g_ind_gpu && ind_ok ? " indirect" : "", xfb_on);
+    // vh/fh: the same content hash shader_first_visit/LARECOMP_DEBUG_PIPELINE_HASH use, so a devlost dump's last draws
+    // can be matched against that logging (chasing the Steam Deck GPU hang, 2026-10-29) - only hashed when the trace
+    // is actually on (dl_active mirrors dl_note's own lazy env check): shader_stage_hash walks the whole code+consts.
+    if (dl_active()) {
+        uint64_t dvh = shader_stage_hash(&st.program->stages[0]), dfh = shader_stage_hash(&st.program->stages[1]);
+        dl_note("draw vs %llx fs %llx vh %llx fh %llx%s xfb %d", (unsigned long long)st.program->stages[0].code_addr,
+                (unsigned long long)st.program->stages[1].code_addr, (unsigned long long)dvh, (unsigned long long)dfh,
+                g_ind_gpu && ind_ok ? " indirect" : "", xfb_on);
+    }
     if (g_ind_gpu && ind_ok && dl_on > 0) {
         dl_args[(dl_n - 1) & (DL_N - 1)] = gwin_base + gmem_lo + g_ind_off;
         memcpy(dl_snap[(dl_n - 1) & (DL_N - 1)], (const void *)(uintptr_t)(gwin_base + gmem_lo + g_ind_off), 20);

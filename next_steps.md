@@ -26,28 +26,232 @@ Push with `git push github linux:main` and `git push gitlab linux:main`. `ZA-WOR
 Untracked files that are **not ours** (from another session): `ZA-NEMESIS-RE.md`, `runtime/hle/za_worklog.c`,
 `.claude/`. Never commit them.
 
-## 1. GPU hang about 20 s into gameplay (top priority)
+## 1. GPU hang about 20-60 s into a run (top priority)
 
-This started with the true-720p fix. Frame generation was on in every crashed run.
+This started with the true-720p fix. **2026-10-29 evening session: frame generation is NOT required** - ruled out
+by a clean single-instance repro with `framegen = 0`. Also reproduces with `gpu_overlap = off`. See findings below;
+the frame-gen/overlap suspicions from the morning session are superseded.
 
 - **Symptoms:**
-  - dmesg shows `ring gfx_0.0.0 timeout ... Process pokemon-za`, then `Ring gfx_0.0.0 reset failed`, then a MODE2
-    reset.
-  - The log shows `FATAL: r failed: -4 (record.c:584)` and `vkWaitSemaphores: -4`.
-  - The `LARECOMP_VK_DEVLOST_TRACE` output names only the last ops the CPU queued, not the culprit.
-- **Suspect:** frame gen's compute-queue path (fgq, `device.c`). At 720p the motion-vector and generated images match
-  the presented size now, so more of its path runs. A race is likely between fgq's queue and the game's queue (image
-  layouts, shared images, `rec_sc_lock`, `fgq_drain`).
+  - dmesg shows `ring gfx_0.0.0 timeout ... Process pokemon-za`, then either `Ring gfx_0.0.0 reset succeeded` (game
+    sometimes survives, see below) or `reset failed` -> MODE2 reset (`GPU reset(N) succeeded!`, `[drm] device
+    wedged, but no recovery needed`).
+  - The log shows `FATAL: r failed: -4 (record.c:584)` (submit_run's `VK_CHECK` after `vkQueueSubmit2`) and/or
+    `FATAL: vkGetSemaphoreCounterValue(...) failed: -4 (exec.c:166)` (`vk_completed_seq`, called from
+    `vk_collect_dead`). **Both are downstream symptoms** - the device is already lost by the time these fire; don't
+    chase them as the root cause. A `[vk] device fault:` line (device.c) logs just before them when it happens.
+  - Before that: `[hang] no new frame for 20 s (frame N): the game looks stuck` (the runtime's own watchdog) with a
+    dump of every guest thread's futex/condvar state (`arb-lock`/`cv-wait` lines) - this looks like normal
+    background-thread churn still running while the render path is stuck on the dead GPU, not itself the cause.
+  - Hit at a fairly **fixed early frame (~300-400)**, reproduced **before any scripted movement started** (our
+    input script's first walk command is at frame 1020) - so it is not tied to player input/movement, more likely
+    the loading-screen -> overworld transition or an early fixed intro/cutscene pass.
+  - `LARECOMP_VK_DEVLOST_TRACE` output names only the last ops the CPU queued, not the culprit.
+  - **Secondary bug found:** after the crash, the process can get stuck *again* after printing
+    `[vk] pipeline cache: saved ...` (clean-shutdown path) - alive at ~15% CPU, no new log lines, needs `SIGKILL`
+    (`SIGTERM` does nothing). Likely a cleanup call (`vkDeviceWaitIdle`-style) spinning/polling a device that's
+    already lost instead of bailing out on `VK_ERROR_DEVICE_LOST`.
+- **RADV_DEBUG=hang evidence (two captures, `/home/deck/radv_dumps_<pid>_<timestamp>/`):**
+  1. First capture (launched as the `deck` user): `registers.log` showed `CP_CPF_STALLED_STAT1`:
+     `RING_FETCHING_DATA=1`, `INDR1_FETCHING_DATA=1` - the command processor stuck mid-fetch of a command/indirect
+     buffer. `vm_fault.log` was empty (no reported fault - a true stuck read). `umr_waves.log` failed outright
+     (needs `debugfs`, which the `deck` user doesn't have).
+  2. Second capture (relaunched as **root**, same repro): got the full data. **`vm_fault.log` showed a real
+     permission fault**: `CLIENT_ID: SQC (data)`, failing VM page `0xf7d4fefd0000` - **not** in the guest heap's
+     address family (`0x8000...`/`0x8001...` everywhere else in this codebase) and **not a tracked buffer at all**
+     (`VA not found!` in the address-binding report). Reads like a shader using a garbage/stale value as a GPU
+     pointer rather than a legitimate freed-buffer reuse.
+  - `bo_history.log` both times: continuous small-buffer (16-288 KB) alloc/destroy churn right up to the hang, no
+    gap - consistent with per-frame descriptor/uniform/storage recycling under contention.
+  - `umr`'s database is incomplete for Van Gogh (lots of `[BUG]: reg [...] not found on asic [vangogh]`) - wave-level
+    shader identification did not come through even as root. Might need a newer `umr`/`amdgpu` on the Deck, or a
+    different capture tool.
+- **Working theory:** `[plat] page write tracking off: the guest heap is a userptr import` (always logged on the
+  Deck, because of the required `LARECOMP_VK_HEAP_DMABUF=0` RADV fix) - this doesn't just affect `gpu_overlap`
+  (which still logs "forced without page write tracking: the hash probe instead of the write watch" and stays on
+  when the ini asks for it); the same gap affects the general in-place storage-range protection (`exec.c`
+  `RS_PROBE`/`RS_COPY`, around line 3389) and the vertex cache. Any of these falling back to the weaker hash-probe
+  (or missing a case it doesn't probe) could produce exactly this class of stale/garbage GPU read. This is a
+  broader, pre-existing hazard from the RADV workaround, not something `gpu_overlap` introduced by itself.
+- **Ruled out this session (each its own clean single-instance repro, same `record.c:584` / device-lost signature,
+  same ~20-75 s / ~frame 300-400 timing every time):**
+  - Frame generation (`framegen = 0`).
+  - `gpu_overlap` (`gpu_overlap = off`).
+  - GTAO / SSGI / water reflections (`ambient_occlusion = indirect_light = water_reflections = 0`).
+  - Texture prefetch (`LARECOMP_TEX_PREFETCH=0`).
+  - **The write-watch theory itself** (see below) - the single biggest result of the session.
+  - Player input/movement: hangs before the scripted walk even starts.
+  - Dual-instance contention: first repro was confounded by two GPU clients: all repros above are single-instance.
+- **Write-watch theory DISPROVED:** temporarily removed the Deck's RADV fix (`LARECOMP_VK_HEAP_DMABUF` /
+  `LARECOMP_VK_GMEM_WINDOW`, commented out in `run.sh` for one test only, restored after) so the guest heap goes back
+  to a real dma-buf import with OS page-write tracking available (confirmed: no more "page write tracking off: ...
+  userptr import" log line). **The hang still happened** (ring timeout, same crash signature, ~21 s in - this run
+  also had the black-world bug as expected, which doesn't matter for this test). So the missing write-watch
+  (§1's leading theory earlier in this session) is **not** the cause of this particular hang. It may still be a real,
+  separate bug (the `gpu_overlap` vertex/index race documented elsewhere in this file is probably still real), just
+  not this one.
+- **New lead: a freshly-compiled pipeline/shader, not a buffer race.** The `LARECOMP_TEX_PREFETCH=0` run's log shows
+  a tight cluster of `[shader] first visit N: pipeline <hash> <hash>` lines (brand-new pipeline compiles, not cache
+  hits) immediately before the hang, including the **same pipeline hash recompiled three times with different
+  second-hash variants** in a few lines (`b3a5396059fd6d6c`, visits 46/50/51). This fits every observation so far:
+  it is independent of every feature toggle tried (none of them control whether THESE specific pipelines get
+  compiled), and it naturally happens at a fixed early point (the first time the loading-screen/early-UI shaders are
+  used, before they're warm in `cache/shader_seen.txt` / `shader_code.bin` - see `shader_prep.c`/`shader_seen.c`).
+  Worth checking whether repeated crashes are preventing the shader cache from ever fully warming (every one of this
+  session's crashed runs needed `SIGKILL`, which may skip the normal `shader_seen.txt` save) - if so, a clean full
+  playthrough once might stop reproducing it, which would itself be a strong clue (a specific one-time shader
+  compile is the trigger, not a shader that's bad on every use).
+- **Secondary bug (independent of the above):** after any of these crashes, the process can get stuck *again* right
+  after printing `[vk] pipeline cache: saved ...` (the clean-shutdown path) - alive at ~15% CPU, no new log lines for
+  5+ s, needs `SIGKILL` (`SIGTERM` does nothing). Likely a device-lost cleanup call spinning/polling instead of
+  bailing out on `VK_ERROR_DEVICE_LOST`. Worth its own fix regardless of the GPU hang's root cause, since it turns
+  every crash into a wedged process on the Deck.
+- **Mesa note:** this Deck's driver is `Mesa 26.2.0-devel (git-5c65d4fc31)` - a development snapshot, not necessarily
+  a stable release (may just be SteamOS's own branch; not confirmed either way). Not chased further this session.
+- **FOUND THE PIPELINE (2026-10-29 night).** Added `LARECOMP_DEBUG_PIPELINE_HASH=<hex vs/fs hash>` (`exec.c`, next to
+  the `shader_first_visit("pipeline", ...)` call, ~line 6736): on a matching first-visit pipeline it logs the full
+  `shader_rec_format` record. Built (runtime-only, no `GAMELIB_ID` change - no Deck recompile needed) and pushed.
+  Ran with `LARECOMP_DEBUG_PIPELINE_HASH=b3a5396059fd6d6c` (the vertex hash seen 3x in every earlier capture):
+  - All 3 first-visit variants at **frame 367** decode to the same shape, just a different fragment shader each
+    time: `G vs=b3a5396059fd6d6c fs=<4c2e8481137283ea|78d53b502c665b45|2c2e27deec6d86ed> f=0 a=16 s=8/0 c=25 d=0 n=1
+    m=f b=1 B=0005060506010100 k=0 t=2 p=1`. That's a **plain 2D UI quad**: one vertex attribute, one 8-byte-stride
+    stream, no depth, alpha blending on, render target format `0x25` = **`VK_FORMAT_R8G8B8A8_UNORM`** (matches the
+    `fmt 0x25` seen in `[vk] UI source: ...` lines elsewhere in the same log) - three UI elements sharing a vertex
+    shader with three different fragment-shader variants, built back-to-back.
+  - **~30 frames later** (frame 397/398): `[slow] frame 398 161 ms ... gpu wait 155 ms` /
+    `[hitch] frame 397: 180 ms ... GPU waits 155.0`. That is the last thing the log shows - **the process was killed
+    outright with no FATAL/crash line this time** (matches the already-documented "killed during the hang before it
+    logs" behaviour). dmesg: ring timeout -> `GPU reset(19) succeeded!` right after.
+  - So: a fresh UI pipeline (vertex shader `b3a5396059fd6d6c`, one of its 3 fragment variants) is built, and within
+    half a second the GPU stalls for 155 ms and then the ring times out. This is consistent across every earlier
+    capture (RADV_DEBUG=hang's register dump, the VM-fault capture) and independent of every setting ruled out
+    above - **this specific shader/pipeline is the leading suspect for the hang itself**, not a buffer-lifetime race.
+- **IDENTIFIED THE UI ELEMENT (2026-10-29 night, same session).** Reran with `LARECOMP_VK_LOG_UI_SOURCES=1` added
+  alongside `LARECOMP_DEBUG_PIPELINE_HASH`. Right before the target pipeline's first visit (same frame, 366), the log
+  shows a tight cluster of small-rectangle UI panels going up as `[vk] UI source: ...]` entries - `340x164`,
+  `276x100`, `556x164`, `492x100`, `828x188`, `764x124`, all format `0x25`, all `NOT SCALED` - six similarly-shaped
+  panels in a row, right after `[launcher] team: 6 in the party` is logged at boot. That is almost certainly **the
+  game's own loading-screen team-roster display (the 6 Pokémon icon/info plates shown while the world loads)**, and
+  the target pipeline (`vh b3a5396059fd6d6c`, 3 fragment variants, the same plain textured-quad shape as those
+  panels: `a=16 s=8/0 c=25 d=0 ... b=1`) is one of that roster's elements, built in the same pipeline-creation batch.
+  (This run also showed two separate ~160 ms GPU-wait stalls, frames 377/378 *and* 393/394, before the process was
+  finally killed around frame 406+ - so a stall doesn't necessarily kill it immediately; something cumulative across
+  stalls likely triggers the eventual ring timeout.)
+- **CORRECTION, same night: it is not one specific UI shader.** Extended `LARECOMP_VK_DEVLOST_TRACE`'s draw trace to
+  also print each draw's content hash (`vh`/`fh`, the same ones `shader_first_visit`/`LARECOMP_DEBUG_PIPELINE_HASH`
+  use - `exec.c`, `dl_note("draw vs ... fs ... vh ... fh ...")`, gated by a new `dl_active()` helper so the extra
+  `shader_stage_hash` work only happens when the trace is on). Built, pushed, reran. **This run's devlost trace shows
+  a completely different draw sequence than the UI-flyout one**: a long run of GPU-indirect draws (Z-A's culling
+  compute writing instance counts - `exec.c` ~line 7333: "the GPU fills in parts of the parameters: the instance
+  count, Pokémon Z-A's culling compute" - grass/foliage-style instanced draws, `args now: <count> <inst> <first>
+  <base> <binst>` with large binst values), then a compute `dispatch`, then the main `1920x1080 depth-buffered` world
+  pass. No UI panels this time, and a different pipeline hash entirely (`fb9f69aa13db58a1`/`5a70f0599d0b1105`, not
+  `b3a5396059fd6d6c`).
+  - So the earlier "flyout" identification was real for *that* capture, but isn't *the* cause - different runs die on
+    different content. The actual common thread across every capture so far is **timing** (the loading-screen ->
+    world transition, always early, always some mix of fresh pipeline compiles / heavy texture uploads / GPU-indirect
+    draws), not one broken shader.
+  - Read `vk_full_barrier` (`exec.c` line 454: `ALL_COMMANDS -> ALL_COMMANDS`, inserted at every render-pass boundary
+    via `begin_pass()`, line 1570) - looks correctly conservative for the common case, and Vulkan doesn't allow a
+    `vkCmdDispatch` mid-render-pass anyway, so a missing compute-write -> indirect-draw-read barrier isn't obviously
+    confirmed just by reading the code. Could still be a narrower case (e.g. a compute dispatch issued through a path
+    that skips `begin_pass()`'s barrier) - unverified.
+  - **`VK_LAYER_KHRONOS_validation` is on the Deck** (bundled inside Steam's own runtime -
+    `~/.local/share/Steam/{ubuntu12_64,steamrt64}/libVkLayer_khronos_validation.so`) **but has no manifest anywhere**
+    on the system, so the Vulkan loader can't discover it via `VK_INSTANCE_LAYERS` without hand-writing one and
+    pointing `VK_LAYER_PATH` at it. Not attempted this session (a bit of a side quest on its own); doing this and
+    turning on GPU-assisted / synchronization validation for one run is probably the single most direct way to catch
+    a missing barrier if that's the real cause, instead of more manual log correlation.
 - **Plan:**
-  1. **Bisect.** Play once with frame gen off (F1, or `framegen = 0` in the ini), and once with
-     `LARECOMP_FG_QUEUE=0` (frame gen on, presented from the main queue).
-  2. **Run RADV's hang debugger.** Add `export RADV_DEBUG=hang` to `run.sh` for one run. It is slow; on a hang it
-     writes `~/radv_dumps_*` naming the draw and shaders. If the hang does not happen under it, that points to a
-     cross-queue sync race.
-  3. **Check for a devcoredump.** The Deck's `gpucore-catch` loop copies
-     `/sys/class/drm/card0/device/devcoredump/data` to `/tmp/gpucore-HHMMSS.txt`. It does not survive a reboot,
-     so restart it after one.
-  4. Fix, then commit the uncommitted work above.
+  1. Write a `VkLayer_khronos_validation.json` manifest next to the existing `.so` (or anywhere, with `VK_LAYER_PATH`
+     pointed at it) and run once with `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` and synchronization validation
+     enabled (`VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT`, or a
+     `vk_layer_settings.txt`) - if there's a missing barrier anywhere in the hot path, this should name the exact two
+     commands.
+  2. Failing that, keep using `LARECOMP_DEBUG_PIPELINE_HASH` + the now-hash-annotated `LARECOMP_VK_DEVLOST_TRACE` on
+     more captures to build up a corpus of "what was drawing when it died" - if a pattern emerges (e.g. always a
+     compute dispatch shortly before, or always a specific render-target format) that's useful even without
+     validation layers.
+  3. Bind `LARECOMP_SYNC_SHADERS=1` (existing env var per `exec.c`) for one run to see if forcing synchronous shader
+     compilation changes the failure point.
+  4. Try a full, uninterrupted playthrough past this point (clean exit, not `SIGKILL`) to see if `shader_seen.txt` /
+     `shader_code.bin` getting fully warmed makes the hang stop reproducing on a later run.
+  5. Get `umr` working for Van Gogh (lots of `[BUG]: reg [...] not found on asic [vangogh]` even as root) or find an
+     alternative wave-inspection tool.
+  6. Fix the secondary shutdown-hang bug regardless (see above) - reproduced again this session (process alive at
+     ~14% CPU, no progress, needed `SIGKILL`).
+  7. Fix the main hang, then commit the uncommitted work from the morning session (above).
+- Both `LARECOMP_DEBUG_PIPELINE_HASH` and the hash-annotated `LARECOMP_VK_DEVLOST_TRACE` stay in the tree (cheap,
+  opt-in, matches house style) for the next capture.
+
+## 1b. The validation-layer run and the resource-recycling theory (2026-10-29 night, continued)
+
+Got a second opinion (an independent review of all the above) that pushed back on "missing compute->indirect-draw
+barrier": a shader dereferencing an address that isn't in any tracked buffer's family at all (`0xf7d4fefd0000`, "VA
+not found") fits **a resource recycled while the GPU might still reference it** better than a GPU-side ordering gap -
+and specifically a **cross-submission** lifetime bug (frame N+1 recycling a descriptor set / vertex-cache slot /
+command-buffer region while frame N's GPU work is still in flight), not something `vkCmdPipelineBarrier` inside one
+submission would even address. Two things followed from that:
+
+- **Hand-wrote a Vulkan loader manifest** for `VK_LAYER_KHRONOS_validation` (present on the Deck inside Steam's own
+  runtime - `~/.local/share/Steam/ubuntu12_64/libVkLayer_khronos_validation.so` - but with no manifest anywhere, so
+  undiscoverable via `VK_INSTANCE_LAYERS` without one). `vulkaninfo` confirmed the loader picks it up. Ran the actual
+  game with synchronization validation only (core/API-param/object-lifetime/thread-safety checks disabled via
+  `vk_layer_settings.txt` to cut noise/overhead).
+  - It DID catch a real, repeated hazard: `SYNC-HAZARD-READ-AFTER-WRITE` - a depth image is sampled as a
+    `COMBINED_IMAGE_SAMPLER` (binding #32) right after being written as a depth/stencil attachment, `write_barriers:
+    0`; and the reverse, `SYNC-HAZARD-WRITE-AFTER-READ` - the same depth image is written again (at
+    `vkCmdEndRendering`'s store) right after a shader sampled it, `read_barriers: 0`. ~3600 of each, though - this
+    happens **every frame**, not once, so it's very likely a pre-existing, mostly-benign pattern (this engine
+    evidently survives thousands of these in every normal run) rather than the fatal trigger. Worth fixing on its own
+    merits (it's a real spec violation and could be the "0x80010c800000" CB/DB fault in section 2 below, or cause
+    subtle visual bugs), but didn't look like *the* hang.
+  - The run itself became impractical to finish: sync validation's per-resource tracking overhead grew the longer the
+    engine ran (this engine does thousands of draws/sets per frame), and the process ended up stuck at ~50% CPU with
+    zero new log output for 2+ minutes, far past where it would normally have hung or survived. Never reached a
+    verdict on whether the *real* bug also reproduces under validation; killed it rather than wait indefinitely.
+- **Tested the cross-submission-recycling theory directly** with the three existing "kill switches" named in
+  CLAUDE.md's bisect list, one at a time, each a clean single-instance run: `LARECOMP_VK_NO_SET_REUSE=1`,
+  `LARECOMP_VK_NO_KEY_MEMO=1`, `LARECOMP_VK_NO_SLOT_MEMO=1`. **All three still hang**, same `record.c:584` /
+  ring-timeout signature, same ~25-45 s window. So it is not descriptor-set reuse, pipeline/key memoization, or
+  whatever "slot memo" covers, specifically - at least not alone. (The secondary shutdown-hang bug reproduced on two
+  of these three runs too: alive at 15-30% CPU, zero progress, needs `SIGKILL`, even after the ring reset itself
+  *succeeded* at the kernel level - whatever this process gets stuck in post-reset doesn't care whether the reset
+  "worked.")
+- **State after this round: every specific mechanism tried (frame gen, overlap, GTAO/SSGI/water, texture prefetch,
+  write-watch availability, set reuse, key memo, slot memo) is now ruled out as the sole cause**, each via a clean
+  repro. What's left standing: the timing correlation (always the loading-screen -> world transition, always early),
+  the two different-content devlost traces (UI panels once, GPU-indirect foliage+compute dispatch another time), and
+  the real-but-seemingly-benign depth sync hazard above. The GMEM_FAST compute-copy path (`LARECOMP_VK_GMEM_FAST=0`,
+  `LARECOMP_VK_GFAST_MERGE=0` - not yet tried) and the vertex cache (already off on this integrated GPU per
+  `[vk] vertex cache off: integrated GPU` seen in every log - so not a live suspect) are the remaining named kill
+  switches from CLAUDE.md's list not yet tested one at a time.
+- **`LARECOMP_VK_GMEM_FAST=0` and `LARECOMP_VK_GFAST_MERGE=0` tested individually, same night: both still hang.**
+  Same `record.c:584` / ring-timeout signature both times (~25-30 s in, clean single-instance runs). `GMEM_FAST=0`'s
+  run died cleanly (no stuck-shutdown this time); `GFAST_MERGE=0`'s hit the usual `vk_collect_dead`/`vk_submit_extra`
+  crash stack.
+- **So every named kill switch in CLAUDE.md's bisect list has now been tried individually, and none of them is the
+  sole cause:** frame gen, GPU overlap, the storage write-watch's availability, set reuse, key memo, slot memo,
+  GMEM_FAST, GFAST_MERGE. (The vertex cache is already off on this integrated GPU by default - not a live suspect.)
+  This is a meaningfully different situation than a normal "disable the suspect feature" bisect: **no single
+  opt-in/opt-out subsystem is responsible**, which argues more strongly for either (a) something always-on and
+  structural (the base draw/submit/recycle path itself, not any of its optional accelerations), or (b) the
+  driver/hardware explanation the second opinion rated low-but-nonzero (a genuine Mesa/RADV bug on this git-snapshot
+  build, workload-shaped rather than workload-agnostic, which would explain why it's insensitive to all these
+  application-side toggles).
+- **Next, not yet tried (heavier than a kill-switch toggle):**
+  1. A RenderDoc capture (the layer is already on the Deck - `VK_LAYER_RENDERDOC_Capture` in the `vulkaninfo`
+     listing) of a run right up to the hang - lets a human actually see the frame and its resource states, instead
+     of reconstructing them from logs.
+  2. Instrument the engine's own resource-recycle fence checks directly (log the fence value a slot/set/pipeline/
+     command-buffer is freed at vs. the fence value actually completed by the GPU, looking for an off-by-one) -
+     more surgical than disabling whole subsystems, and would catch the recycling theory even where `vkCmdPipeline
+     Barrier`-level validation can't see it.
+  3. Try `RADV_DEBUG=` feature toggles (NGG, DCC) per the second opinion's suggestion, to localize to a driver
+     subsystem rather than rule application code in or out definitively - cheap, and doesn't require touching our
+     own code at all.
+  4. If practical, a different/older Mesa build on the Deck purely as a driver-vs-app discriminator (SteamOS's Mesa
+     is usually not user-swappable without real effort, so this is a last resort, not a quick test).
 
 ## 2. Recurring GPU page fault at GPU VA 0x80010c800000
 
