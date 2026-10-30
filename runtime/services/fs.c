@@ -693,10 +693,14 @@ static void rom_index(void) {
 // served from a re-rolled copy of the game's file instead (rolled again on each load - a read from its first byte),
 // so the night Battle Zone trainers differ every night. false: not that file / off (the normal path serves it). A mod
 // that replaces trdata_array.bin takes over instead (the game reads the overlay, past this file's range).
+// The Royale Gauntlet mode (runtime/hle/za_gauntlet.c) rides this same load as its once-per-night signal, and wants
+// randomized trainers as part of its own premise - so it also triggers the roll, even with the randomizer's own
+// toggle off.
 extern int za_royale_random_on(void);
+extern bool za_gauntlet_on(void);
 extern void za_royale_random_roll(uint8_t *buf, size_t size);
 static bool za_royale_read(uint8_t *dst, uint64_t size, uint64_t off) {
-    if (!za_royale_random_on()) return false;
+    if (!za_royale_random_on() && !za_gauntlet_on()) return false;
     pthread_mutex_lock(&za_tr_lock);
     if (!za_tr_looked) {
         za_tr_looked = 2;
@@ -1165,6 +1169,8 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
             save_editor_file_read(f->path, b->addr, off, n);
             extern void flags_ext_save_read(const char *path, uint64_t addr, int64_t off, int64_t size);
             flags_ext_save_read(f->path, b->addr, off, n);
+            extern void za_gauntlet_save_read(const char *path, uint64_t addr, int64_t off, int64_t size);
+            za_gauntlet_save_read(f->path, b->addr, off, n);
         }
         OUT(int64_t, 0) = n < 0 ? 0 : n;
         resp_size(resp, 8);
@@ -1187,6 +1193,8 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
             extern bool flags_ext_save_written(const char *path, uint64_t addr, int64_t off, int64_t size);
             errno = 0;
             if (!flags_ext_save_written(f->path, a->addr, off, size)) error = errno ? errno : EIO;
+            extern bool za_gauntlet_save_written(const char *path, uint64_t addr, int64_t off, int64_t size);
+            za_gauntlet_save_written(f->path, a->addr, off, size);
         }
         if (error && f->fs) file_failed(f, "write", error);
         else if (error) { errno = error; resp->result = errno_result(); }

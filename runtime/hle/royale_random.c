@@ -6,6 +6,15 @@
 // the buffer before the game parses it. The trainer's identity (trid / trtype / zaRank) and every other trainer are
 // untouched, so Battle Zone spawns, dialogue and promotion matches keep working; party sizes never change.
 //
+// This prefix set is confirmed complete, not guessed: world/ik_data/field/npc/za_trainer_data/za_trainer_data_array
+// (where each placed trainer's world spawn id resolves to its trdata trid - found while scoping the Royale Gauntlet
+// mode's trainer-spawn seam) lists every trainerId the game actually places, and all but 2 of its 2538 entries (two
+// unrelated story-chapter battles) fall under these four prefixes: 228 `za_rank_*`, 160 `za_rank_inf*`, 2148
+// `dim_rank_*` (the Dimension postgame zones - most of the table), 0 `za_inf_*` (kept for a build/version where it
+// may be used; harmless no-op here). The rank letter right after `za_rank_` runs z,y,x,w,v,u then b,c,d,e,f,g,h (13
+// tiers, no `a` - "A" rank likely isn't its own trainer pool) - informational only, this randomizer doesn't care
+// which letter a trainer is, just that it's a Royale trainer.
+//
 // Only three fields are stored per Royale Pokémon - devId (species), level and seikaku (nature); moves are absent
 // (= the game's own default moveset for the species), and so are formId / sex / item / tokusei (tokusei's default is
 // RANDOM_12, a random ability), so in-place writes of those three are enough and the FlatBuffer stays valid. The
@@ -24,9 +33,12 @@
 #include "../hle.h"
 #include "../settings.h"
 #include "../platform.h"
+#include "za_gauntlet.h"
 #else
 #define ENV(n) getenv(n)
 #define LOG(...) do {} while (0)
+static void za_gauntlet_pick_trainer(const char *trid, int *lo, int *hi) { (void)trid, (void)lo, (void)hi; }
+static void za_gauntlet_night_begin(void) {}
 #endif
 
 // trainer.TrdataMainArray (root): id 0 = values (vector of tables). trainer.TrdataMain: id 0 = trid, id 7..12 = poke1..6.
@@ -182,6 +194,7 @@ int za_royale_random_on(void) {
 
 // Roll `buf` (a whole trdata_array.bin) for one load. Reads the knobs fresh each call, so the menu takes effect.
 void za_royale_random_roll(uint8_t *buf, size_t size) {
+    za_gauntlet_night_begin();  // this load is also the one event that already happens once per in-game night
     int inf = 1, delta = 5;
     uint32_t seed;
 #ifdef ROYALE_RANDOM_TEST

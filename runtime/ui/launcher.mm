@@ -41,6 +41,7 @@ extern "C" {
 #include "romfs_build.h"
 #include "settings.h"
 #include "input_bind.h"
+#include "hle/za_gauntlet.h"
 bool controls_ui_took_back(void);  // ui/controls_ui.mm: B went back a step on Configure inputs
 void input_mouse_release(SDL_Window *w);   // runtime/hle/input.c
 void ui_window_init(void);
@@ -1812,7 +1813,7 @@ static void prelaunch_tab(float sc) {
 }
 
 // ---- the pages
-enum Tab { TAB_PLAY, TAB_MODS, TAB_SAVES, TAB_SETTINGS, TAB_ABOUT, N_TABS };
+enum Tab { TAB_PLAY, TAB_MODS, TAB_SAVES, TAB_GAUNTLET, TAB_SETTINGS, TAB_ABOUT, N_TABS };
 static int g_tab = TAB_PLAY;
 static bool g_changing_folder;  // Play page: "Change game folder" pressed on a set-up copy
 static bool g_focus_play;       // put the controller's cursor on PLAY (opening, back from a page)
@@ -2200,8 +2201,8 @@ extern "C" void launcher_run(const char *root) {
     g_mods_changed = true, g_save_scanned = false;
     bool play = false;
     // LARECOMP_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: mods /
-    // saves / about / settings[:<tab>] / askdelete / setup / extracting / fail<1-8> / tip / aspect; :pt or :en after it
-    // picks the language
+    // saves / gauntlet / about / settings[:<tab>] / askdelete / setup / extracting / fail<1-8> / tip / aspect; :pt or
+    // :en after it picks the language
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     bool test_busy = false;
     if (shot_at) {
@@ -2213,6 +2214,7 @@ extern "C" void launcher_run(const char *root) {
         if (strstr(spec, ":en")) g_settings.ui_lang = UI_LANG_EN, lang_update();
         if (pg && !strncmp(pg + 1, "mods", 4)) g_tab = TAB_MODS;
         if (pg && !strncmp(pg + 1, "saves", 5)) g_tab = TAB_SAVES;
+        if (pg && !strncmp(pg + 1, "gauntlet", 8)) g_tab = TAB_GAUNTLET;
         if (pg && !strncmp(pg + 1, "about", 5)) g_tab = TAB_ABOUT;
         if (pg && (!strncmp(pg + 1, "settings", 8) || !strcmp(pg + 1, "askdelete"))) g_tab = TAB_SETTINGS, menu_tabs_focus(true);
         if (pg && !strncmp(pg + 1, "settings", 8) && pg[9] == ':' && isdigit((unsigned char)pg[10])) g_tab_request_ext = atoi(pg + 10);
@@ -2388,7 +2390,7 @@ extern "C" void launcher_run(const char *root) {
             float lx = 64 + text(dl, F_H2, 20, 64, 32 - text_size(F_H2, 20, "ZA RECOMP").y / 2, C_TEXT, "ZA RECOMP").x;
             text(dl, F_SMALL, 13, lx + 8, 32 - text_size(F_SMALL, 13, "v").y / 2 + 1, C_MUTED, LARECOMP_VERSION);
             const char *tab_names[N_TABS] = {TR("Play", "Jogar"), TR("Mods", "Mods"), TR("Saves", "Saves"),
-                                             TR("Settings", "Configurações"), TR("About", "Sobre")};
+                                             TR("Gauntlet", "Gauntlet"), TR("Settings", "Configurações"), TR("About", "Sobre")};
             float tx = lx + 70;
             int prev_tab = g_tab;
             for (int i = 0; i < N_TABS; i++) {
@@ -2840,6 +2842,64 @@ extern "C" void launcher_run(const char *root) {
                 }
                 ImGui::EndChild();
                 bar = {C_TEAL, TR("Saves live in the save folder next to ZA Recomp", "Os saves ficam na pasta save, ao lado do ZA Recomp")};
+                if (back_key) g_tab = TAB_PLAY, g_focus_play = true;
+            }
+
+            // ================= Gauntlet: Pokémon Z-A's Royale Gauntlet mode (runtime/hle/za_gauntlet.c) - a one-click
+            // way to turn the mode on and go straight into the game with it. The mode can also be toggled from the F1
+            // menu's Mods tab; this page exists so it's not buried there for someone who hasn't found it yet.
+            if (g_tab == TAB_GAUNTLET) {
+                float x = 56, w = W_ - 112, y = 88;
+                ImVec2 ts = text(dl, F_H1, 36, x, y, C_TEXT, TR("Royale Gauntlet", "Gauntlet da Royale"));
+                y += ts.y + 10;
+                y += text(dl, F_BODY, 15, x, y, C_SOFT,
+                          TR("A night-only roguelike run: fight the Z-A Royale's randomized trainers to climb Rank Z "
+                             "up to A. Winning raises your points; losing costs some, but doesn't end the run by "
+                             "itself. Each rank demands a minimum point gain before the next night, though - miss "
+                             "that quota and the run resets to Rank Z.",
+                             "Uma jornada só de noite: enfrente os treinadores sorteados da Royale Z-A para subir do "
+                             "Rank Z até o A. Vencer aumenta seus pontos; perder custa um pouco, mas não encerra a "
+                             "jornada por si só. Porém cada Rank exige um ganho mínimo de pontos antes da próxima "
+                             "noite - não alcançar essa meta reinicia a jornada no Rank Z."), w).y + 20;
+
+                panel(dl, x, y, w, 80);
+                text(dl, F_LABEL, 17, x + 24, y + 14, C_TEXT, TR("Royale Gauntlet mode", "Modo Gauntlet da Royale"));
+                text(dl, F_BODY, 13, x + 24, y + 42, C_MUTED,
+                     g_settings.za_gauntlet_on ? TR("On - the next game started plays as a Gauntlet run",
+                                                     "Ativado - o próximo jogo iniciado já é uma jornada Gauntlet")
+                                               : TR("Off - plays as a normal game", "Desligado - joga normalmente"));
+                if (toggle("##gauntlet_on", &g_settings.za_gauntlet_on, x + w - 24 - 50, y + 22)) settings_save();
+                y += 80 + 20;
+
+                if (g_settings.za_gauntlet_on) {
+                    int wins, losses, streak, best_streak, runs_completed, runs_failed;
+                    int64_t best_points_ever;
+                    za_gauntlet_stats(&wins, &losses, &streak, &best_streak);
+                    za_gauntlet_lifetime(&best_points_ever, &runs_completed, &runs_failed);
+                    float cx = x;
+                    char rt[32]; snprintf(rt, sizeof rt, TR("Rank %s", "Rank %s"), za_gauntlet_rank_name());
+                    cx += chip(dl, cx, y, IC_CHECK, rt) + 8;
+                    char pt[48]; snprintf(pt, sizeof pt, TR("%lld points", "%lld pontos"), (long long)za_gauntlet_points());
+                    cx += chip(dl, cx, y, IC_CHECK, pt) + 8;
+                    if (runs_completed || runs_failed) {
+                        char lt[96];
+                        snprintf(lt, sizeof lt, TR("%d completed, %d failed", "%d completas, %d fracassadas"),
+                                 runs_completed, runs_failed);
+                        cx += chip(dl, cx, y, IC_CHECK, lt) + 8;
+                    }
+                    y += 34 + 20;
+                }
+
+                if (button("##start_gauntlet", g_settings.za_gauntlet_on ? TR("PLAY", "JOGAR")
+                                                                          : TR("Start Royale Gauntlet", "Começar Gauntlet da Royale"),
+                           x, y, 0, 60, BTN_PRIMARY, true, IC_PLAY, F_BTN, 20)) {
+                    g_settings.za_gauntlet_on = true;
+                    g_settings.za_royale_random = true;  // the mode's whole premise is randomized night trainers
+                    settings_save();
+                    play = true;
+                }
+                bar = {C_TEAL, TR("A separate, optional way to play - turn it off any time from here or the F1 menu",
+                                  "Um jeito separado e opcional de jogar - desligue quando quiser por aqui ou pelo menu F1")};
                 if (back_key) g_tab = TAB_PLAY, g_focus_play = true;
             }
 

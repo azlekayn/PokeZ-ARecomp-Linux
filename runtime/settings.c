@@ -53,6 +53,7 @@ Settings g_settings = {
     .frame_dt = true,      // (the world step from a fixed-timestep accumulator: the same speed at any frame rate)
     .za_royale_random = false,  // (Pokémon Z-A: re-roll the night Z-A Royale trainers each load)
     .za_royale_delta = 5,
+    .za_gauntlet_on = false,  // (Pokémon Z-A: Royale Gauntlet mode)
     .inv_keys = true,
     .tracker = true,
     .tracker_filters = -1,
@@ -167,6 +168,7 @@ static void settings_env_overrides(void) {
     if ((e = getenv("LARECOMP_ROYALE_DELTA"))) g_settings.za_royale_delta = atoi(e);
     if (g_settings.za_royale_delta < 0) g_settings.za_royale_delta = 0;  // (royale_random.c's own bounds, so the F1 slider shows what is used)
     if (g_settings.za_royale_delta > 50) g_settings.za_royale_delta = 50;
+    if ((e = getenv("LARECOMP_GAUNTLET"))) g_settings.za_gauntlet_on = atoi(e) != 0;
     if ((e = getenv("LARECOMP_FG_STRENGTH"))) { float v = (float)atof(e); g_settings.fg_strength = v < 0 ? 0 : v > 1 ? 1 : v; }
     if ((e = getenv("LARECOMP_FG_THRESH"))) { float v = (float)atof(e); g_settings.fg_thresh = v < 0 ? 0 : v > 16 ? 16 : v; }
 }
@@ -252,6 +254,7 @@ void settings_load(void) {
         else if (!strcmp(key, "frame_dt")) g_settings.frame_dt = atoi(val) != 0;
         else if (!strcmp(key, "za_royale_random")) g_settings.za_royale_random = atoi(val) != 0;
         else if (!strcmp(key, "za_royale_delta")) g_settings.za_royale_delta = atoi(val);
+        else if (!strcmp(key, "za_gauntlet")) g_settings.za_gauntlet_on = atoi(val) != 0;
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
         else if (!strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;
@@ -365,6 +368,7 @@ void settings_save(void) {
     fprintf(f, "frame_dt = %d\n", g_settings.frame_dt);
     fprintf(f, "za_royale_random = %d\n", g_settings.za_royale_random);
     fprintf(f, "za_royale_delta = %d\n", g_settings.za_royale_delta);
+    fprintf(f, "za_gauntlet = %d\n", g_settings.za_gauntlet_on);
     fprintf(f, "tex_dump = %d\n", g_settings.tex_dump);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");

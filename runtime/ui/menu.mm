@@ -33,6 +33,7 @@ extern "C" float vk_fg_present_rate(void);  // device.c: generated frames actual
 extern "C" {
 #include "../hle.h"
 #include "../settings.h"
+#include "../hle/za_gauntlet.h"
 extern int g_game_is_la;  // runtime/kernel.c: Link's Awakening (its own tabs: randomizer, warp, cheats...)
 #include "menu.h"
 void input_reset(void);
@@ -907,6 +908,36 @@ static void tab_mods(void) {
                        TR("How far a rolled Pokemon's level may stray from that trainer's own level.",
                           "O quanto o nível de um Pokémon sorteado pode variar do nível do próprio treinador.")))
             g_settings.za_royale_delta = (int)d;
+    }
+
+    opt_section(TR("Royale Gauntlet", "Gauntlet da Royale"));
+    // a night-only roguelike run on top of the Royale randomizer above (runtime/hle/za_gauntlet.c). Runtime-only:
+    // no game recompile. Turning it on also randomizes the night trainers (above), even if that toggle is off.
+    opt_toggle(TR("Royale Gauntlet mode", "Modo Gauntlet da Royale"), &g_settings.za_gauntlet_on, false,
+               TR("A night-only run: fight the Royale's randomized trainers. Winning raises your Rank (Z up to "
+                  "A) and points; losing costs points but doesn't end the run by itself. Each rank demands a "
+                  "minimum point gain before the next night, though - miss that quota and the run resets to "
+                  "Rank Z.", "Uma jornada só de noite: enfrente os treinadores sorteados da Royale. Vencer "
+                  "aumenta seu Rank (de Z até A) e seus pontos; perder custa pontos mas não encerra a jornada "
+                  "por si só. Porém cada Rank exige um ganho mínimo de pontos antes da próxima noite - não "
+                  "alcançar essa meta reinicia a jornada no Rank Z."));
+    if (g_settings.za_gauntlet_on) {
+        int wins, losses, streak, best_streak, runs_completed, runs_failed;
+        int64_t best_points_ever;
+        za_gauntlet_stats(&wins, &losses, &streak, &best_streak);
+        za_gauntlet_lifetime(&best_points_ever, &runs_completed, &runs_failed);
+        ImGui::Text(TR("Rank %s   Points %lld   Streak %d (best %d)",
+                        "Rank %s   Pontos %lld   Sequência %d (melhor %d)"),
+                    za_gauntlet_rank_name(), (long long)za_gauntlet_points(), streak, best_streak);
+        ImGui::Text(TR("Runs completed %d   Runs failed %d   Best points ever %lld",
+                        "Jornadas completas %d   Jornadas fracassadas %d   Melhor pontuação %lld"),
+                    runs_completed, runs_failed, (long long)best_points_ever);
+        if (za_gauntlet_debug_on()) {  // LARECOMP_GAUNTLET_DEBUG=1: stand-in until real battle-outcome detection
+            if (opt_button("Simulate win", "Pretend the player just won a Royale bout.")) za_gauntlet_debug_win();
+            if (opt_button("Simulate loss", "Pretend the player just lost a Royale bout.")) za_gauntlet_debug_loss();
+            if (opt_button("Simulate next night", "Pretend a new night's facility visit just began (grades the day)."))
+                za_gauntlet_debug_night();
+        }
     }
     opt_end();
 }

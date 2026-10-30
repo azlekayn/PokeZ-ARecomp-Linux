@@ -131,6 +131,8 @@ typedef struct {
     bool za_royale_random;  // Pokémon Z-A: re-roll the night Z-A Royale trainers each load, so every night differs
                             // (runtime/hle/royale_random.c). Off by default.
     int za_royale_delta;    // its level +/- around each trainer's own level (default 5)
+    bool za_gauntlet_on;    // Pokémon Z-A: Royale Gauntlet mode - a night-only roguelike run, Rank Z..A and points
+                            // against an end-of-day quota (runtime/hle/za_gauntlet.c). Off by default.
     int ui_lang;      // UI_LANG_*: the start screen's language (runtime/ui/launcher.mm); auto = the system's
     // mods/ folders (runtime/services/fs.c layers them): '|' between names. order: first wins where two replace the
     // same file (folders not listed come after, by name); off: not loaded. Edited on the start screen's Mods page.
