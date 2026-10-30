@@ -23,6 +23,18 @@ two captures hit this same pipeline, once with `gpu_overlap` off and once on - c
 mirror-independent, overlap-independent bug the code comment already names, not anything new from this fork
 (confirmed separately by two independent branch-vs-upstream reviews, see below).
 
+**Likely the same bug's non-fatal end of the spectrum: the "flickering" symptoms reported earlier tonight.** Before
+the crash, the user saw objects flickering in and out of existence (confirmed not frame generation - persisted with
+it off), and later, with `gpu_overlap` explicitly on, missing objects and flickering shadows. Both happened
+regardless of `gpu_overlap`'s state, same as the crash. Working inference (not confirmed with a captured log the way
+the crash is): the same transform-feedback skinning readback race, when it lands on *stale-but-plausible* data
+instead of a wildly-invalid address, doesn't fault - it just draws a wrong frame (degenerate/stale positions ->
+a collapsed silhouette or a wrong shadow) and self-corrects next frame once the race happens to land right. One root
+cause, a spectrum of severity from invisible to visibly glitchy to fatal, depending on how badly a given frame's race
+lands. Worth keeping in mind if `LARECOMP_VK_XFB_MIRROR=1` (forcing the mirror on despite the AMD default) is ever
+tried as an experiment - if it changes the flickering's frequency, that's corroborating evidence for this theory
+without needing another crash.
+
 **Recommendation: don't attempt a speculative fix for this tonight.** Upstream's own team has already tried the
 obvious hardening (robustness extensions, serialized submissions) without success, and it's explicitly still open on
 their end. The next useful step is probably reporting *this* session's specifics (the shadow-caster localization, the
