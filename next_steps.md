@@ -99,6 +99,67 @@ the Deck - driven entirely over SSH, launched into the real gamescope session (`
     way), `lasrecomp.log.run21-v0112-vafault-vertexcorruption-17h26-pid40743` (the VA-fault crash with the full
     device-lost report, described above).
 
+**IDENTIFIED THE CRASHING PIPELINE'S SHAPE (2026-10-30, same evening, continued) - it's a shadow-caster pass.**
+After the Deck rebooted (Steam's own gamescope session kept crashing after our GPU resets - worth remembering as a
+symptom: our crash doesn't just kill our process, it can take the whole Steam UI down with it), cleared
+`cache/shader_seen.txt`/`shader_code.bin` (backed up, not deleted - `*.bak-pre-debughash`) and set
+`LARECOMP_DEBUG_PIPELINE_HASH=9c1a6a0125797441` in `run.sh` to force a full decode on this pipeline's next first-visit
+(it was `vh 9c1a6a0125797441 fh d4f2e43272162253` in both of the night's two crashes - see above). Caught it:
+
+    G vs=9c1a6a0125797441 fs=d4f2e43272162253 ph cb8fe2e386bb326b | a=22 s=c/0 c=0,0,0,0,0,0,0,0 d=35 n=1 m=0 b=0 B= k=0 t=2 p=1
+
+Decoded against `shader_rec_format`'s field order (`shader_prep.c` line 64): **one vertex attribute** (`a=22`, no
+comma so `nattrib=1`), **one stream, 12-byte stride, not instanced** (`s=c/0`) - a bare `vec3` position and nothing
+else, **zero color targets** (`c=0,0,0,0,0,0,0,0`, all `VK_FORMAT_UNDEFINED`), **a real depth target** (`d=35`), no
+blending (`b=0`). Unambiguous: **this is a shadow-caster depth-only pass** (position-only vertex data, no shading
+inputs needed for depth-only rendering) - Z-A's sun shadow maps per the earlier `CLAUDE.md`/code comment reference.
+
+- **Confirmed this session: the SAME pipeline crashed twice in a row, once with `gpu_overlap off` and once with
+  `gpu_overlap on`** (the ini was changed to `on` between the two crashes, chasing a separate fps regression - see
+  below). That rules out an overlap-specific cause for *this* crash: whatever's wrong with the shadow-caster pass's
+  vertex data is wrong in the base path shared by both overlap states, not something `hc_lookup`/`vtx_must_copy`
+  introduced or missed.
+- **Working theory, not yet verified:** Z-A's shadow casters very plausibly read a skinned character's
+  GPU-computed position buffer straight back as the shadow pass's vertex input - the exact "skinned character
+  output read straight back as vertex data" case already flagged as a known hazard in §4's `vc_mark_sbufs` comment
+  (`exec.c`). If that compute-skin -> shadow-caster-vertex-read handoff has a gap in the *general* tracking path
+  (not the overlap-only `hc_lookup` one), a shadow pass drawing before the skin compute's write is actually visible
+  (or reading a since-recycled buffer) would produce exactly this: a position stream full of garbage, which is
+  consistent with the "vertex explosions" the user watched happen live before the black-and-white static and the
+  fault. **Not yet confirmed** - next step is finding where shadow-caster draws bind their vertex buffer and
+  checking whether it goes through the same GPU-written-range awareness as the main pass's skinned draws do.
+- Preserved as `data/lasrecomp.log.run22-overlapon-fault-17h51` on the Deck (the overlap-on crash) and the
+  pipeline-detail line is in `lasrecomp-backup-20261030-175007-5092.log` line 748.
+
+**Also found live tonight, a real fps regression independent of all of the above - not yet explained:** the user
+(playing for real, in town, ~56-58k draws/frame) got 15 fps where they're used to a solid 30 with `gpu_overlap`
+off and 50+ with it on. Ruled out: `frame_dt` (fixed separately, see above, doesn't affect raw fps) and the cleared
+shader cache (fps stayed at 15 even once `compiles 0 pending` showed the cache had caught up). Two real suspects,
+neither confirmed:
+  1. **`gpu_overlap` may not have actually been running most nights either** - `overlap_on()` (`exec.c` line 130)
+     caches its decision once per process (confirmed: toggling it in F1 mid-session does nothing, matching what the
+     user already knew from experience) and **defaults to off unconditionally on any AMD GPU** regardless of the
+     `auto` setting (added in v0.1.10 after a different AMD-only crash, issues #39/#54 - `read invalid
+     0xbeefdeadc000`). The ini had `gpu_overlap = auto` tonight, not `on` as `next_steps.md`'s own "Steam Deck
+     reference" section documents - if the user's daily setup normally forces it via a launch flag
+     (`LARECOMP_GPU_OVERLAP=1`, possibly one of the two missing flags from earlier tonight), losing that flag would
+     silently fall back to off on this AMD GPU, which would track with "better with overlap explicitly set to on"
+     (confirmed better fps when the ini was changed to `on` directly, see above) - but overlap being on introduced
+     new symptoms (next bullet), so this isn't a clean win yet.
+  2. **The v0.1.12 upstream rebase itself (§1c/§1d) has never been tested on the Deck with real heavy content until
+     tonight** - only idle/light content locally and in this session's own idle Deck test earlier. It's entirely
+     possible upstream's own changes between the old base and v0.1.12 cost real fps in a busy scene, independent of
+     any of this session's three fixes. Not isolated from the overlap question above - needs a proper A/B (old
+     AppImage vs new, same spot, same settings) to separate "missing launch flag" from "the rebase is slower here"
+     from "today's fixes cost more in heavy scenes than the 170 s/5 min tests ever exercised."
+- **With `gpu_overlap = on`, the user also reported real rendering corruption under sustained real play**: missing
+  objects and flickering shadows, before the second shadow-caster crash above. Given the SAME pipeline crashed with
+  overlap both on and off, this specific corruption may be the live, non-fatal version of the same underlying bug
+  rather than a new overlap-specific one - but that's not confirmed either, and it was *worse* (visually) with
+  overlap on. **Recommendation: leave `gpu_overlap = auto` (effectively off on this AMD GPU) until the shadow-caster
+  theory above is actually run down** - the rendering corruption is a worse problem than lower fps, and forcing
+  overlap back on to chase the fps regression risks making a known-bad situation more visible, not fixing it.
+
 ---
 
 Previous paragraph (same day, earlier session, dev PC only) for context:
