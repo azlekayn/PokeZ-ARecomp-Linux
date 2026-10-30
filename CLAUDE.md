@@ -109,3 +109,10 @@ One-time setup: `tools/setup_windows.ps1` (MSYS2 UCRT64 toolchain). Fast exe reb
   changes the behaviour. Match it.
 - Guest threads are real host threads, around 150 in Z-A. Any shared kernel state needs a lock (`g_klock`, or
   `g_mlock` for the memory map).
+- Prefer the automatic/default fix over a new `LARECOMP_*` env var or F1 settings row: existing flags are mostly
+  diagnostic/bisection tools, not how an ordinary session should reach correct behaviour. Auto-detect the right
+  choice (capability checks, like `pt_init()`/`overlap_on()` already do) instead of asking the player to set
+  something. A new flag is a last resort for something genuinely risky/unproven that needs an escape hatch, not a
+  permanent toggle.
+- Standing rule: commit and push every major change (to `github` and `gitlab`, both already configured as remotes)
+  rather than letting work sit unpushed in the working tree.
