@@ -79,7 +79,8 @@ def main():
     rng = random.Random(args.seed)
     include_inf = "infinite" in args.include.lower()
 
-    data = json.load(open(args.json, encoding="utf-8"))
+    with open(args.json, encoding="utf-8") as fh:
+        data = json.load(fh)
     values = data["values"]
     night = [t for t in values if is_night(t["trid"], include_inf)]
     if not night:
@@ -143,7 +144,8 @@ def main():
         return
     os.makedirs(args.out, exist_ok=True)
     out_json = os.path.join(args.out, "trdata_array.json")
-    json.dump(data, open(out_json, "w", encoding="utf-8"), ensure_ascii=False)
+    with open(out_json, "w", encoding="utf-8") as fh:  # (closed - flushed - before flatc reads it)
+        json.dump(data, fh, ensure_ascii=False)
     subprocess.run([args.flatc, "-b", "-o", args.out, args.bfbs, out_json], check=True)
     os.remove(out_json)
     romfs_dir = os.path.join(args.out, "world", "ik_data", "trainer", "trdata")
