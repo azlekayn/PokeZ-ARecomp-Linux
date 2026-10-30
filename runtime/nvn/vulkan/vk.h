@@ -120,7 +120,9 @@ static inline void vkc_CmdSetPrimitiveRestartEnable(VkCommandBuffer cb, VkBool32
 
 void vk_device_fault_report(void);
 void vk_checkpoint(VkCommandBuffer cb, uint64_t mark);
-#define VK_CHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { if (r_ == VK_ERROR_DEVICE_LOST) vk_device_fault_report(); \
+void vk_fatal_device_lost(const char *what) __attribute__((noreturn));  // (device.c: no notice dialog, straight to _exit)
+#define VK_CHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { \
+    if (r_ == VK_ERROR_DEVICE_LOST) vk_fatal_device_lost(#x); \
     FATAL("%s failed: %d (%s:%d)\n", #x, r_, __FILE__, __LINE__); } } while (0)
 
 typedef struct {

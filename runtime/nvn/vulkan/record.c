@@ -730,7 +730,7 @@ static void present_run(const void *p) {
     else {
         static int n;
         if (n++ < 10) LOG("[vk] present failed: %d\n", r);
-        if (r == VK_ERROR_DEVICE_LOST) { vk_device_fault_report(); FATAL("vkQueuePresentKHR: device lost\n"); }
+        if (r == VK_ERROR_DEVICE_LOST) vk_fatal_device_lost("vkQueuePresentKHR");
     }
     atomic_fetch_add_explicit(&presents_done, 1, memory_order_release);
     if (on > 0) {

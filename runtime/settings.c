@@ -155,15 +155,18 @@ void settings_resolve_defaults(bool integrated) {
         g_settings.antialias == AA_SMAA ? "smaa" : "off");
 }
 
-// LARECOMP_FRAMEGEN / LARECOMP_FRAME_DT / LARECOMP_FG_STRENGTH / LARECOMP_FG_THRESH: a test / launcher override for the
-// frame generation settings. Applied to g_settings at load, so the F1 menu shows (and can edit) the value they set;
-// not read again after that - change the setting in F1 to keep a value across starts.
+// LARECOMP_FRAMEGEN / LARECOMP_FRAME_DT / LARECOMP_FG_STRENGTH / LARECOMP_FG_THRESH / LARECOMP_ROYALE_RANDOM / _DELTA: a
+// test / launcher override for the frame generation, frame step and Royale randomizer settings. Applied to g_settings at
+// load, so the F1 menu shows (and can edit) the value they set; not read again after that - change the setting in F1 to
+// keep a value across starts.
 static void settings_env_overrides(void) {
     const char *e;
     if ((e = getenv("LARECOMP_FRAMEGEN"))) g_settings.framegen = atoi(e) != 0;
     if ((e = getenv("LARECOMP_FRAME_DT"))) g_settings.frame_dt = atoi(e) != 0;
     if ((e = getenv("LARECOMP_ROYALE_RANDOM"))) g_settings.za_royale_random = atoi(e) != 0;
     if ((e = getenv("LARECOMP_ROYALE_DELTA"))) g_settings.za_royale_delta = atoi(e);
+    if (g_settings.za_royale_delta < 0) g_settings.za_royale_delta = 0;  // (royale_random.c's own bounds, so the F1 slider shows what is used)
+    if (g_settings.za_royale_delta > 50) g_settings.za_royale_delta = 50;
     if ((e = getenv("LARECOMP_FG_STRENGTH"))) { float v = (float)atof(e); g_settings.fg_strength = v < 0 ? 0 : v > 1 ? 1 : v; }
     if ((e = getenv("LARECOMP_FG_THRESH"))) { float v = (float)atof(e); g_settings.fg_thresh = v < 0 ? 0 : v > 16 ? 16 : v; }
 }
@@ -356,7 +359,6 @@ void settings_save(void) {
     fprintf(f, "indirect_light = %d\n", g_settings.ssgi);
     fprintf(f, "indirect_light_strength = %d\n", g_settings.ssgi_strength);
     fprintf(f, "water_reflections = %d\n", g_settings.water_ssr);
-    fprintf(f, "temporal_aa = %s\n", g_settings.taa ? "fsr2" : "game");  // (PR#57 parsed it but never saved it)
     fprintf(f, "framegen = %d\n", g_settings.framegen);
     fprintf(f, "fg_strength = %.2f\n", g_settings.fg_strength);
     fprintf(f, "fg_thresh = %.1f\n", g_settings.fg_thresh);

@@ -495,6 +495,23 @@ void vk_device_fault_report(void) {
         rt ? rt : "on (default)", g_vk.vids ? "on" : "off", vk_overlap_state() ? "on" : "off");
 }
 
+// A confirmed-lost (or unrecoverably hung) GPU can't be trusted for anything further - not more Vulkan calls, and
+// not even the normal crash dialog. FATAL's plat_fatal_notice shows a blocking SDL_ShowSimpleMessageBox; right after
+// a device reset the window/surface can be in a state where nobody can see or dismiss it, which looks exactly like
+// the whole process hanging (found 2026-10-30, cross-checked against totk-recomp's own hang handler - a sibling
+// LAS-Recomp-derived project - which has the identical fix for the identical symptom: go straight to _exit(), no
+// dialog, once the device is confirmed gone). Logs everything we already have (device fault report, the devlost
+// checkpoint/op trace), then exits at once.
+void vk_fatal_device_lost(const char *what) {
+    LOG("[vk] %s: device lost\n", what);
+    vk_device_fault_report();
+    extern void vk_devlost_dump(void);
+    vk_devlost_dump();
+    fflush(stdout);
+    fflush(stderr);
+    _exit(5);
+}
+
 // Each memory heap: its size, the driver's budget for this process (smaller when other programs hold that memory),
 // this process's use and the part LAS Recomp allocated through VMA. Logged at start and when an allocation fails
 // (issue #45: out of device memory on a 6 GB GTX 1060 - our own use, or other programs'?).
@@ -1744,7 +1761,7 @@ static void fgq_do(const FgJob *j) {  // (the thread, holding fgq_run)
                         .commandBufferInfoCount = 1, .pCommandBufferInfos = &cbs, .signalSemaphoreInfoCount = 1, .pSignalSemaphoreInfos = &sg};
     vkResetFences(g_vk.dev, 1, &f->fence);
     VkResult sr = vkQueueSubmit2(g_vk.cqueue, 1, &si, f->fence);
-    if (sr == VK_ERROR_DEVICE_LOST) { rec_sc_unlock(); vk_device_fault_report(); FATAL("[fg] queue submission: device lost\n"); }
+    if (sr == VK_ERROR_DEVICE_LOST) { rec_sc_unlock(); vk_fatal_device_lost("[fg] queue submission"); }
     if (sr != VK_SUCCESS) {  // (nothing submitted: no present - its semaphore would never be signalled; the slot is free)
         rec_sc_unlock();
         static int n;
@@ -2085,6 +2102,34 @@ static const char *pp_text(void) {
     return s;
 }
 
+// Frame generation's own presented rate (menu.mm's FPS overlay, "+N generated" when Frame generation is on): rolling,
+// like menu.mm's fps_note, but counting only this present's own successful hits below - a dropped generated frame (no
+// free window image: fg_dropped) doesn't count, so a GPU too slow to keep up shows the rate it's actually landing on
+// screen, not the rate it's attempting.
+static float fg_rate_dt[60];
+static int fg_rate_n, fg_rate_i;
+static double fg_rate_sum, fg_rate_shown, fg_rate_at;
+static uint64_t fg_rate_last_ns;
+static void fg_rate_note(void) {
+    uint64_t now_ns = SDL_GetTicksNS();
+    if (fg_rate_last_ns) {
+        float dt = (float)((now_ns - fg_rate_last_ns) / 1e9);
+        if (fg_rate_n == 60) fg_rate_sum -= fg_rate_dt[fg_rate_i];
+        else fg_rate_n++;
+        fg_rate_dt[fg_rate_i] = dt;
+        fg_rate_sum += dt;
+        fg_rate_i = (fg_rate_i + 1) % 60;
+    }
+    fg_rate_last_ns = now_ns;
+    double now_s = (double)now_ns / 1e9;
+    if (now_s - fg_rate_at >= 0.5 || now_s < fg_rate_at) fg_rate_at = now_s, fg_rate_shown = fg_rate_sum > 0 ? fg_rate_n / fg_rate_sum : 0;
+}
+// 0 once generated frames stop landing for a while (frame generation off, or every recent one dropped) instead of
+// holding the last number forever.
+float vk_fg_present_rate(void) {
+    return (!fg_rate_last_ns || SDL_GetTicksNS() - fg_rate_last_ns > 750000000ull) ? 0 : (float)fg_rate_shown;
+}
+
 // The GPU side of a present (the render thread when it's on, rqueue.c): the present pass, the overlay, shots.
 // frame: the number of this present (the game thread's frame when it was queued).
 void backend_present_now(NvnTexture *t, uint64_t frame) {
@@ -2212,7 +2257,6 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         fgq_real_seq = renderer_issued_seq();  // (the game frame's present submission: fgq waits for it to finish)
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) exit_after_shot();
         if (vk_fg_image && vk_fg_frame == frame) {  // frame generation: the generated frame, after the game's own
-            static const float black2[4] = {0, 0, 0, 1};
             static uint64_t nfg, fg_dropped;
             static int fglog = -1;
             if (fglog < 0) fglog = getenv("LARECOMP_FG_LOG") != NULL;
@@ -2239,17 +2283,18 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 mid = e ? (!strcmp(e, "half") ? -3 : atol(e) > 0 ? atol(e) : -1) : rec_on() ? -3 : -1;
             }
             if (fgq_usable()) {  // (its own queue and present thread: on time on screen - fgq)
-                if (vk_frame_begin_offscreen(black2)) {
+                if (vk_frame_begin_offscreen(black)) {
                     VkCommandBuffer cb2 = vk_cmd();
                     vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);
                     extern void vk_overlay_replay(VkCommandBuffer cb);
                     vk_overlay_replay(cb2);
                     vk_frame_end(NULL);
+                    fg_rate_note();
                 } else fg_dropped++;
             } else {  // (the game's queue, the gap on the recorder: the generated frame finishes with the game's)
                 if (!rec_on() && mid != -1)
                     plat_sleep_until_ns(plat_now_ns() + (mid == -3 ? 16666667ull * (uint64_t)iv / 2 : (uint64_t)mid));
-                if (vk_frame_begin_to(black2, 0)) {  // (best effort: no free window image now -> drop the generated frame)
+                if (vk_frame_begin_to(black, 0)) {  // (best effort: no free window image now -> drop the generated frame)
                     VkCommandBuffer cb2 = vk_cmd();
                     vk_present_draw(cb2, vk_fg_image, (float)vx, (float)vy, (float)vw, (float)vh, pv);
                     extern void vk_overlay_replay(VkCommandBuffer cb);
@@ -2258,6 +2303,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                     // hand it to the game's next one)
                     if (rec_on() && mid != -1) rec_next_present_gap(mid == -3 ? 1 : (uint64_t)mid);
                     vk_frame_end(NULL);
+                    fg_rate_note();
                 } else fg_dropped++;
             }
         }

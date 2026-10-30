@@ -208,15 +208,28 @@ void vk_wait_seq(uint64_t seq) {
     __atomic_fetch_add(&cum_wait, waited, __ATOMIC_RELAXED);
     wait_account(waited);
     // Callers recycle command buffers and allocations after this returns; a timeout is not completion.
-    if (r == VK_TIMEOUT) FATAL("[vk] GPU did not finish submission %llu within 10 s; stopping before reusing in-flight resources\n",
-                              (unsigned long long)seq);
-    else if (r == VK_SUCCESS) cq_resolve_done(seq);  // (the game reads its timing counters after waiting)
-    else {
+    if (r == VK_TIMEOUT) {
+        // A ring-timeout reset (amdgpu) or a Windows TDR isn't instant - it can still be running past this 10 s wait
+        // (totk-recomp's identical hang handler saw a Windows reset take ~100 s). Give it a bounded grace period
+        // before deciding nothing more is coming: if the GPU actually finishes, or the driver confirms the device
+        // lost sooner, don't wait out the whole period for no reason.
+        LOG("[vk] GPU did not finish submission %llu within 10 s; waiting up to 60 s more for the driver's own recovery\n",
+            (unsigned long long)seq);
         extern void vk_devlost_dump(void);
         vk_devlost_dump();
-        vk_device_fault_report();
-        FATAL("vkWaitSemaphores: %d (device lost)\n", r);
-    }
+        uint64_t t1 = SDL_GetTicksNS();
+        VkResult r2 = VK_TIMEOUT;
+        for (int i = 0; i < 60 && r2 == VK_TIMEOUT; i++) {
+            r2 = vkWaitSemaphores(g_vk.dev, &wi, 1000000000ull);
+            uint64_t v = 0;
+            if (r2 == VK_TIMEOUT && vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &v) == VK_ERROR_DEVICE_LOST) { r2 = VK_ERROR_DEVICE_LOST; break; }
+        }
+        if (r2 != VK_SUCCESS) vk_fatal_device_lost("vkWaitSemaphores");
+        LOG("[vk] the GPU finished submission %llu after %.1f s more: carrying on\n", (unsigned long long)seq,
+            (SDL_GetTicksNS() - t1) / 1e9);
+        cq_resolve_done(seq);
+    } else if (r == VK_SUCCESS) cq_resolve_done(seq);  // (the game reads its timing counters after waiting)
+    else vk_fatal_device_lost("vkWaitSemaphores");
 }
 
 uint64_t vk_pending_seq(void) { return submit_seq + 1; }
@@ -461,6 +474,7 @@ void vk_full_barrier(VkCommandBuffer cb) {
 
 static void ring_retire(void);
 void vc_flush(void);
+void hc_flush(void);
 static void xm_copy_back(VkCommandBuffer cb);
 
 // ---- LARECOMP_GPUPROF_AT=<frame>: GPU time per pass / dispatch / copy of that frame, logged as "[gpuprof]".
@@ -565,6 +579,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     VkCommandBufferSubmitInfo cbs[2];
     int n = 0;
     vc_flush();
+    hc_flush();
     if (s->upload_begun) {
         vk_full_barrier(s->upload);  // uploads complete before anything in the main buffer reads them
         rec_EndCommandBuffer(s->upload);
@@ -3184,52 +3199,48 @@ void vk_exec_texture_destroyed(NvnTexture *t) {
 }
 void vk_alias_reset(void) { naliases = 0; }  // (reboot: every texture goes)
 
-// ---- FSR 2 (fsr2_frame): the scene camera per frame - the view-projection in vertex constant buffer 5 of the
-// G-buffer draws (4+ colour targets) - and their depth target.
+// ---- FSR 2 (fsr2_frame): the scene camera per frame, and its depth target.
+// 2026-10-29: this used to read vertex cb5 of the first draw into 4+ colour targets (the G-buffer), on the theory
+// that its clip position is cb5[0..3] (rows) x the model matrix (cb10) - a plausible-looking, invertible matrix, but
+// the motion vectors it produced came out ~0: either the wrong matrix or a fixed-camera pass. The lighting pass's own
+// camera reconstruction (gtao_before_lighting, fragment cb2 of the GTAO_LIGHTING draw) is proven correct instead -
+// GTAO's world positions from it are visibly right - so this now reads that: NOT a conventional view-projection, but
+// the game's own world_pos = ndc.x*m0 + ndc.y*m1 + depth*m2 + m3 reconstruction basis (already the INVERSE of a
+// view-projection, column-packed). fsr2_copy below inverts the *other* way around now because of that.
+static bool gtao_is_lighting(Prog *pr);
+static NvnTexEntry *gtao_tex_entry(ShaderInfo *si, int i);
+static float mv_tanfovy;  // tan(half fov y) this frame, straight from the cbuf (fsr2_copy's fov_y - exact, not a matrix-row guess)
 static void mv_note_draw(Prog *pr) {
     extern uint64_t vk_frame_counter(void);
     uint64_t f = vk_frame_counter();
-    int n = 0;
-    for (int i = 0; i < 8; i++) n += st.rt.color[i] != NULL;
-    // (the shaders' constant buffer k is the stage's binding k - 3: cbuf_info. The G-buffer vertex shaders' clip
-    // position is cb5[0..3] (rows) x their model matrix, cb10)
-    {   // (debug) LARECOMP_MV_LOG=<frame>: 4 frames from it, again every 300 (6 times): every draw into 4+ colour targets and a depth (the
-        // G-buffer's, or anything shaped like it): its depth's size and each vertex constant buffer's first 16 floats -
-        // which one is the scene camera's view-projection (mv_vp: the motion vectors came out ~0 in Z-A, 2026-10-29)
-        static long at = -2;
-        if (at == -2) at = ENV("LARECOMP_MV_LOG") ? atol(ENV("LARECOMP_MV_LOG")) : -1;
-        static uint64_t lf;
-        static int nd;
-        if (at >= 0 && f >= (uint64_t)at && (f - (uint64_t)at) % 300 < 4 && (f - (uint64_t)at) / 300 < 6 && n >= 4 && st.rt.depth) {
-            if (lf != f) lf = f, nd = 0;
-            if (nd++ < 6) {
-                TexBackend *db = st.rt.depth->backend;
-                LOG("[mvlog] frame %llu draw %d: %d colour, depth %ux%u, fs %016llx\n", (unsigned long long)f, nd, n,
-                    db ? db->width : 0, db ? db->height : 0, (unsigned long long)g_cur_fs_hash);
-                for (int k = 0; k < 18; k++) {
-                    if (!st.ubuf[0][k].addr || st.ubuf[0][k].size < 64) continue;
-                    const float *u = (const float *)(uintptr_t)st.ubuf[0][k].addr;
-                    char line[400];
-                    int o = snprintf(line, sizeof line, "[mvlog]   cb%d (%llu bytes):", k + 3, (unsigned long long)st.ubuf[0][k].size);
-                    for (int i = 0; i < 16 && o < (int)sizeof line - 16; i++) o += snprintf(line + o, sizeof line - (size_t)o, " %.4g", u[i]);
-                    LOG("%s\n", line);
-                }
-            }
-        }
-    }
-    if (mv_frame[0] == f || !st.rt.depth || !st.ubuf[0][2].addr || st.ubuf[0][2].size < 64) return;
-    if (n < 4) return;
-    const float *m = (const float *)(uintptr_t)st.ubuf[0][2].addr;
+    if (mv_frame[0] == f || !gtao_is_lighting(pr)) return;
+    NvnTexEntry *de = gtao_tex_entry(pr->fi, 1);
+    const Range *cam = &st.ubuf[1][2];
+    if (!de || !de->tex->backend || !cam->addr || cam->size < 22 * 16) return;
+    const float *c = (const float *)(uintptr_t)cam->addr;
+    const float *m = c + 12 * 4;  // m0..m3: gtao_before_lighting's own extraction (pc[0..15])
     for (int i = 0; i < 16; i++) if (!isfinite(m[i])) return;
-    if (m[12] == 0 && m[13] == 0 && m[14] == 0) return;  // (perspective: w depends on the position)
+    const float *campos = c + 19 * 4;
+    if (!isfinite(campos[0]) || !isfinite(campos[1]) || !isfinite(campos[2]) || (campos[0] == 0 && campos[1] == 0 && campos[2] == 0)) return;
+    // fsr2_copy inverts whatever lands in mv_vp unconditionally (inv4): refuse a singular (or near-singular) m0..m3
+    // here rather than let it through to produce huge/garbage reprojection values until the next camera cut resets it.
     float a0 = m[0] * m[5] - m[1] * m[4], a1 = m[0] * m[6] - m[2] * m[4], a2 = m[0] * m[7] - m[3] * m[4], a3 = m[1] * m[6] - m[2] * m[5],
           a4 = m[1] * m[7] - m[3] * m[5], a5 = m[2] * m[7] - m[3] * m[6], b0 = m[8] * m[13] - m[9] * m[12], b1 = m[8] * m[14] - m[10] * m[12],
           b2 = m[8] * m[15] - m[11] * m[12], b3 = m[9] * m[14] - m[10] * m[13], b4 = m[9] * m[15] - m[11] * m[13], b5 = m[10] * m[15] - m[11] * m[14];
     if (fabsf(a0 * b5 - a1 * b4 + a2 * b3 + a3 * b2 - a4 * b1 + a5 * b0) < 1e-9f) return;
+    {   // (debug) LARECOMP_MV_LOG=<frame>: logs this capture, again every 300 frames (6 times)
+        static long at = -2;
+        if (at == -2) at = ENV("LARECOMP_MV_LOG") ? atol(ENV("LARECOMP_MV_LOG")) : -1;
+        if (at >= 0 && f >= (uint64_t)at && (f - (uint64_t)at) % 300 == 0 && (f - (uint64_t)at) / 300 < 6)
+            LOG("[mvlog] frame %llu: camera (%.2f, %.2f, %.2f), m0..m3 %.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g\n",
+                (unsigned long long)f, campos[0], campos[1], campos[2], m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+    }
     mv_frame[1] = mv_frame[0], memcpy(mv_vp[1], mv_vp[0], sizeof mv_vp[0]);
     mv_frame[0] = f, memcpy(mv_vp[0], m, sizeof mv_vp[0]);
-    mv_depth = st.rt.depth;
-    if (mv_depth->backend) fsr2_scene_w = ((TexBackend *)mv_depth->backend)->width, fsr2_scene_h = ((TexBackend *)mv_depth->backend)->height;
+    mv_tanfovy = fabsf(c[21 * 4 + 1]);
+    mv_depth = de->tex;
+    TexBackend *db = de->tex->backend;
+    fsr2_scene_w = db->width, fsr2_scene_h = db->height;
 }
 
 // (renderer_stats, once per stats interval) copies made aliases / renamed / partly or fully copied later
@@ -5103,7 +5114,8 @@ static void gfast_finish(VkCommandBuffer cb) {
 #define VC_TAB 8192                   // entries (open addressing)
 #define VC_MAX_RANGE (64ull << 20)    // larger bound ranges: read in place
 #define VC_BUDGET (768ull << 20)      // device-local bytes kept; the least recently used go first
-typedef struct { uint64_t lo, hi, used_seq; uint32_t gen, epoch, gpu_until; VkBuffer buf; VmaAllocation mem; bool gpu; } VcEnt;
+// hash: the last copy's content hash (vc_hash_mode only - no OS write tracking to tell staleness from instead)
+typedef struct { uint64_t lo, hi, used_seq, hash; uint32_t gen, epoch, gpu_until; VkBuffer buf; VmaAllocation mem; bool gpu; } VcEnt;
 static VcEnt vc_tab[VC_TAB];
 static uint32_t vc_pend[VC_TAB];  // entries the pending submission draws from (vc_flush brings them up to date)
 static int vc_npend;
@@ -5157,6 +5169,23 @@ static bool pt_init(void) {
     vc_page_gen[0] = ++vc_gen;  // (the probe took page 0's tracking)
     return true;
 }
+
+// Without page write tracking, GPU overlap has nothing to catch the game rewriting vertex / index data the GPU may
+// still read from the frame before (guest_direct's vtx_must_copy: unconditional copies, every draw, every frame -
+// correct but ~15x the upload bandwidth on a mostly-static scene, measured 2026-10-30). Most of that data is either
+// truly static (loaded once, read forever) or GPU-written (skinning, transform feedback) and never touched by the
+// CPU again, so the actual race only matters for the (presumably much smaller) part the CPU really does rewrite.
+// Content hashing can't tell "rewritten with the same bytes" from "never touched" the way storage's RS_PROBE can't
+// either (same limitation, same reason) - but unlike storage's per-frame lists, that distinction barely matters
+// here: this never binds guest memory to the GPU directly, only a device-local copy (vc_tab, same buffer as the
+// tracked path) refreshed - via a GPU-ordered copy, same queue, so never racing its own prior reads - only when the
+// hash changes. A range that's genuinely never rewritten gets exactly one copy, ever, then serves free from cache;
+// one that IS being rewritten gets caught (not necessarily on the very frame it changes to identical bytes, but
+// never serving stale-and-wrong data, and never binding the raceable guest heap). vc_page_gpu is still populated
+// (vc_mark_gpu) so GPU-written ranges keep bypassing the cache exactly as with real tracking - a GPU-written buffer
+// isn't CPU-safe to hash/copy without its own fence.
+static bool vc_hash;  // decided once, alongside vc_on below
+static bool vc_hash_mode(void) { return vc_hash; }
 
 // Pages outside the window: Pokémon Z-A's textures sit in the alias region (0x74..., its SDK's address regions), not in
 // the physical memory window - every check of theirs was "unknown" and sampled 4096 scattered bytes (~5500 a second
@@ -5225,7 +5254,7 @@ static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint3
 
 // Heap pages [lo, hi) (offsets) written by the GPU: never cached from now on.
 static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
-    if (!pt_init()) return;
+    if (!pt_init() && !vc_hash_mode()) return;
     uint32_t now = (uint32_t)vk_frame_counter() + 1;
     for (uint64_t p = lo / VC_PAGE; p < (hi + VC_PAGE - 1) / VC_PAGE && p < gwin_max / VC_PAGE; p++) vc_page_gpu[p] = now;
     vc_epoch++;
@@ -5250,8 +5279,15 @@ static bool vcache_lookup(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
             vc_on = 0;
         }
         if (vc_on && !pt_init()) {
-            LOG("[vk] vertex cache off: no page write tracking\n");
-            vc_on = 0;
+            if (overlap_on()) {  // vc_hash_mode above: a content-hash probe instead of OS dirty-page bits
+                vc_hash = true;
+                vc_page_gpu = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_gpu);  // vc_mark_gpu: GPU-written ranges still bypass the cache
+                LOG("[vk] vertex cache: no page write tracking, using a content-hash probe instead (GPU overlap needs vertex / "
+                    "index data protected too; see guest_direct/vc_hash_mode)\n");
+            } else {
+                LOG("[vk] vertex cache off: no page write tracking\n");
+                vc_on = 0;
+            }
         }
     }
     if (!vc_on || (!gmem_buf && !gc_lazy) || gmem_lo || size > VC_MAX_RANGE) return false;
@@ -5323,24 +5359,37 @@ void vc_flush(void) {
     uint32_t g = ++vc_gen;
     static uint64_t pages[4096];
     uint64_t t0 = SDL_GetTicksNS();
-    for (int i = 0; i < vc_npend;) {
-        uint64_t lo = vc_tab[vc_pend[i]].lo, hi = vc_tab[vc_pend[i]].hi;
-        int j = i + 1;
-        for (; j < vc_npend && vc_tab[vc_pend[j]].lo <= hi + 64 * VC_PAGE; j++)
-            if (vc_tab[vc_pend[j]].hi > hi) hi = vc_tab[vc_pend[j]].hi;
-        uint64_t pg = VC_PAGE;
-        int n = plat_written_pages(gwin_base + lo, hi - lo, pages, 4096, &pg);
-        prof_vc_queries++;
-        if (n < 0 || n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_page_gen[p] = g;  // (all)
-        else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - gwin_base) / VC_PAGE] = g;
-        if (n > 0) prof_vc_scan_pages += (uint64_t)n;
-        i = j;
-    }
+    bool hmode = vc_hash_mode();  // (no OS write tracking: a content hash decides staleness instead, per entry below)
+    if (!hmode)
+        for (int i = 0; i < vc_npend;) {
+            uint64_t lo = vc_tab[vc_pend[i]].lo, hi = vc_tab[vc_pend[i]].hi;
+            int j = i + 1;
+            for (; j < vc_npend && vc_tab[vc_pend[j]].lo <= hi + 64 * VC_PAGE; j++)
+                if (vc_tab[vc_pend[j]].hi > hi) hi = vc_tab[vc_pend[j]].hi;
+            uint64_t pg = VC_PAGE;
+            int n = plat_written_pages(gwin_base + lo, hi - lo, pages, 4096, &pg);
+            prof_vc_queries++;
+            if (n < 0 || n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_page_gen[p] = g;  // (all)
+            else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - gwin_base) / VC_PAGE] = g;
+            if (n > 0) prof_vc_scan_pages += (uint64_t)n;
+            i = j;
+        }
     prof_vc_scan_ns += SDL_GetTicksNS() - t0;
     VkCommandBuffer cb = vk_upload_cmd();
     if (vc_gpu_expired) { vk_full_barrier(cb); vc_gpu_expired = false; }  // (after the earlier submissions' writes)
     for (int i = 0; i < vc_npend; i++) {
         VcEnt *e = &vc_tab[vc_pend[i]];
+        if (hmode) {  // one whole-range hash per entry, one whole-range copy when it differs (or on the first use: gen 0)
+            uint64_t h = range_hash(gwin_base + e->lo, e->hi - e->lo);
+            if (!e->gen || h != e->hash) {
+                VkBufferCopy cp = {e->lo, 0, e->hi - e->lo};
+                gmem_copy(cb, e->buf, &cp, 1, false);
+                prof_vc_copied += cp.size;
+                e->hash = h;
+            }
+            e->gen = g;
+            continue;
+        }
         VkBufferCopy cp[64];
         int nc = 0;
         for (uint64_t p = e->lo / VC_PAGE; p < e->hi / VC_PAGE; p++) {
@@ -5363,6 +5412,166 @@ void vc_flush(void) {
 // device-local cache above, else read in place - no per-draw copy, no index scan for the copy size. The game fences its
 // CPU writes as on the Switch. Falls back to copies outside the heap or without the import; LARECOMP_VK_COPY_VERTICES=1
 // forces copies.
+//
+// Overlap (overlap_on() above) needs the storage write watch for exactly this reason - "the only thing that catches
+// the game rewriting its light lists with the same bytes while the GPU reads them" - and snap_storage's RS_PROBE was
+// fixed to always copy without it (a same-bytes rewrite raced an indirect draw's instance count, read as a float,
+// 0x42480000: device lost). Vertex / index data gets no probe at all normally - it is bound in place here,
+// unconditionally, every draw - so the identical unwatched race applies to it too, and worse: not just a few
+// per-frame lists, every vertex stream and index buffer the game rewrites between frames. vtx_must_copy mirrors
+// storage's fix for it: with overlap on and no watch, never bind in place - always copy (the vc_tab/xm_lookup caches
+// above are unaffected: those are already device-local copies, not the guest heap itself).
+static bool vtx_must_copy(void) { return overlap_on() && !pt_init(); }
+
+// hc_lookup/hc_flush: a content-hash probe cache for vtx_must_copy's case, separate from vcache_lookup/vc_tab above
+// because that one's offset math (lo = addr - gwin_base) assumes the import starts at the window's own base - wrong
+// by gmem_lo bytes under LARECOMP_VK_GMEM_WINDOW (the Deck's required RADV fix: it always makes gmem_lo != 0, which
+// is exactly the configuration vtx_must_copy exists for - vcache_lookup's own "|| gmem_lo ||" bails out rather than
+// read/write gmem_buf at the wrong offset). This is keyed on offsets into gmem_buf itself (GM_OFF-adjusted, so
+// gmem_lo is already accounted for), with its own small buffer pool/LRU (mirrors vc_tab's, not shared with it: the
+// two key spaces aren't comparable). Same reasoning as vc_hash_mode: never binds guest memory to the GPU, only a
+// device-local copy refreshed - via a GPU-ordered copy, same queue as the draws that read it, so never racing its
+// own prior reads - only when the range's content hash changes since last use. A genuinely static range (most of a
+// scene's world geometry) costs one copy, ever, then serves free; one the CPU keeps rewriting costs one copy a
+// submission, same as the blunt always-copy version, but only for the range that actually needs it.
+//
+// 2026-10-30: tried redoing this as one pre-allocated device-local buffer in two halves used in turn (totk-recomp's
+// "device window" - a sibling LAS-Recomp-derived project, for the GPU-written-storage-buffer version of this same
+// problem), to avoid a VMA buffer create/destroy per distinct range. Measured WORSE: totk-recomp's window protects a
+// handful of small, short-lived storage buffers, where "a whole half's regions are presumed stale on every flip" is
+// a fine tradeoff; ours needs to keep a large, mostly-static vertex/index working set resident for as long as it
+// keeps being drawn, and discarding half of it on every flip - whether or not anything in it actually changed -
+// measured upload bandwidth back up near the blunt always-copy version's (~14 GB/2s vs ~800 MB/2s here, same test).
+// Reverted to the per-range VMA buffer + true LRU below, which only ever evicts the genuinely least-recently-used
+// entry - the right fit for "many long-lived ranges", even though it costs more VkBuffer/VmaAllocation churn than
+// the two-halves idea does for totk-recomp's narrower job.
+#define HC_TAB 8192
+#define HC_MAX_RANGE (64ull << 20)
+#define HC_BUDGET (256ull << 20)  // device-local bytes kept on top of whatever else is already resident
+typedef struct { uint64_t lo, hi, used_seq, hash; VkBuffer buf; VmaAllocation mem; bool primed; } HcEnt;
+static HcEnt hc_tab[HC_TAB];
+static uint32_t hc_pend[HC_TAB];
+static int hc_npend;
+static uint64_t hc_bytes;
+#define HC_DEAD 1024
+static struct { VkBuffer b; VmaAllocation m; uint64_t seq; } hc_dead[HC_DEAD];
+static int hc_ndead;
+static void hc_free_dead(bool all) {
+    uint64_t done = vk_completed_seq();
+    int k = 0;
+    for (int i = 0; i < hc_ndead; i++) {
+        if (!all && hc_dead[i].seq > done) { hc_dead[k++] = hc_dead[i]; continue; }
+        vmaDestroyBuffer(g_vk.vma, hc_dead[i].b, hc_dead[i].m);
+    }
+    hc_ndead = k;
+}
+static bool hc_drop(HcEnt *e) {  // (freed once the submissions that may read it are done)
+    if (hc_ndead == HC_DEAD) { vk_wait_seq(vk_pending_seq() - 1); hc_free_dead(false); }
+    if (hc_ndead == HC_DEAD) return false;  // (all read by the pending submission: keep it)
+    hc_dead[hc_ndead].b = e->buf; hc_dead[hc_ndead].m = e->mem; hc_dead[hc_ndead++].seq = e->used_seq + VK_DEAD_MARGIN;
+    hc_bytes -= e->hi - e->lo;
+    memset(e, 0, sizeof *e);
+    return true;
+}
+// Is [off, off+size) (GM_OFF-relative) GPU-written right now, per vc_mark_gpu/vc_mark_sbufs's own page table (the
+// exact one vcache_lookup's e->gpu check reads - translated here from gmem_buf-relative to heap-relative via
+// + gmem_lo). Found by review 2026-10-30: hc_flush's range_hash is a raw CPU pointer dereference and gmem_copy's
+// vkCmdCopyBuffer has no fence of its own either - both fine for a CPU rewrite (that's exactly the race they
+// protect against, same reasoning as vc_hash_mode), but neither is safe to run against a range a compute/vertex
+// shader might still be writing (Z-A does this: skinning output read straight back as vertex data). A GPU write and
+// a later GPU read of it are already correctly ordered by the queue on their own - no CPU touch needed or wanted -
+// so hc_lookup treats a known-GPU-written range as trivially "cached": bind the import directly, same as the
+// pre-overlap-fix path always did for it. NULL vc_page_gpu (vcache fully off: LARECOMP_VK_VCACHE=0) means no way to
+// tell, which this treats as "not GPU-written" rather than skip protection - a real CPU rewrite racing in that case
+// is the crash this whole thing exists to prevent; a GPU-written range routed through the hash cache instead is, at
+// worst, the same torn-read risk this comment just said to avoid, but only in that explicit opt-out configuration.
+static bool hc_maybe_gpu(uint64_t off, uint64_t size) {
+    if (!vc_page_gpu) return false;
+    uint32_t now = (uint32_t)vk_frame_counter() + 1;
+    uint64_t lo = (off + gmem_lo) / VC_PAGE, hi = (off + size + gmem_lo + VC_PAGE - 1) / VC_PAGE;
+    for (uint64_t p = lo; p < hi && p < gwin_max / VC_PAGE; p++)
+        if (vc_page_gpu[p] && now < vc_page_gpu[p] + VC_GPU_HOLD) return true;
+    return false;
+}
+// off/size: already GM_OFF-relative (an offset into gmem_buf, [0, gmem_size)).
+static bool hc_lookup(uint64_t off, uint64_t size, VkBuffer *buf, VkDeviceSize *voff) {
+    if (!gmem_buf || !size || off + size > gmem_size) return false;
+    if (hc_maybe_gpu(off, size)) { *buf = gmem_buf; *voff = off; return true; }
+    if (size > HC_MAX_RANGE) return false;
+    uint64_t lo = off & ~(VC_PAGE - 1), hi = (off + size + VC_PAGE - 1) & ~(VC_PAGE - 1);
+    if (hi > gmem_size) hi = gmem_size;
+    uint64_t pend = vk_pending_seq();
+    uint64_t h = (lo * 0x9E3779B97F4A7C15ull) ^ (hi * 0xC2B2AE3D27D4EB4Full);
+    uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (HC_TAB - 1), free_slot = ~0u, old_slot = ~0u;
+    HcEnt *e = NULL;
+    for (int probe = 0; probe < 16; probe++, slot = (slot + 1) & (HC_TAB - 1)) {
+        HcEnt *c = &hc_tab[slot];
+        if (c->buf && c->lo == lo && c->hi == hi) { e = c; break; }
+        if (!c->buf && free_slot == ~0u) free_slot = slot;
+        if (c->buf && c->used_seq < pend && (old_slot == ~0u || c->used_seq < hc_tab[old_slot].used_seq)) old_slot = slot;
+    }
+    if (!e) {  // a new range: its own device-local buffer (not primed: hc_flush copies it whole)
+        if (hc_npend == HC_TAB) return false;
+        if (hc_ndead) hc_free_dead(false);
+        if (free_slot == ~0u) {
+            if (old_slot == ~0u || !hc_drop(&hc_tab[old_slot])) return false;
+            free_slot = old_slot;
+        }
+        while (hc_bytes + (hi - lo) > HC_BUDGET) {  // over budget: the least recently used entry goes
+            int lru = -1;
+            for (int i = 0; i < HC_TAB; i++)
+                if (hc_tab[i].buf && hc_tab[i].used_seq < pend && (lru < 0 || hc_tab[i].used_seq < hc_tab[lru].used_seq)) lru = i;
+            if (lru < 0 || !hc_drop(&hc_tab[lru])) return false;
+        }
+        e = &hc_tab[free_slot];
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = hi - lo,
+                                 .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &e->buf, &e->mem, NULL) != VK_SUCCESS) { memset(e, 0, sizeof *e); return false; }
+        e->lo = lo; e->hi = hi;
+        hc_bytes += hi - lo;
+    }
+    if (e->used_seq != pend) {  // first use in this submission: brought up to date by hc_flush before it runs
+        // Found by review 2026-10-30 (of an earlier redesign that hit this same class of bug more easily): don't
+        // claim a safe binding for an entry we can't queue a refresh for - hc_pend is sized HC_TAB, but an existing
+        // entry reused here (not freshly created - that path already checks hc_npend == HC_TAB before this) could
+        // still overflow it if one submission touches more than HC_TAB distinct ranges. Falling through to the
+        // caller's blunt copy for just this one keeps the guarantee instead of silently serving stale contents.
+        if (hc_npend == HC_TAB) return false;
+        e->used_seq = pend;
+        hc_pend[hc_npend++] = (uint32_t)(e - hc_tab);
+    }
+    *buf = e->buf;
+    *voff = off - lo;
+    return true;
+}
+// At submission (vk_submit_extra, before the upload buffer closes, alongside vc_flush): hash each pending entry's
+// full range and copy it into its device-local buffer only when the hash changed since the last submission that
+// used it (or it was never primed yet).
+void hc_flush(void) {
+    if (!hc_npend) return;
+    VkCommandBuffer cb = vk_upload_cmd();
+    for (int i = 0; i < hc_npend; i++) {
+        HcEnt *e = &hc_tab[hc_pend[i]];
+        uint64_t h = range_hash(gwin_base + gmem_lo + e->lo, e->hi - e->lo);
+        if (!e->primed || h != e->hash) {
+            VkBufferCopy cp = {e->lo, 0, e->hi - e->lo};
+            gmem_copy(cb, e->buf, &cp, 1, false);
+            e->hash = h;
+            e->primed = true;
+        }
+    }
+    hc_npend = 0;
+}
+// In-place reboot (vk_exec_reset): every hc_tab buffer is guest-heap-relative and the heap import is about to be
+// replaced, so none of them stay valid.
+static void hc_reset(void) {
+    for (int i = 0; i < HC_TAB; i++) if (hc_tab[i].buf) vmaDestroyBuffer(g_vk.vma, hc_tab[i].buf, hc_tab[i].mem);
+    memset(hc_tab, 0, sizeof hc_tab);
+    hc_npend = 0;
+    hc_free_dead(true);
+    hc_bytes = 0;
+}
 
 // index: an index buffer. Never read from the transform feedback mirror: transform feedback writes vertex data only, the mirror has no INDEX_BUFFER usage (the validation
 // layer: vkCmdBindIndexBuffer on it, 423 times in 15 s), and index data the game wrote into the arena's memory after a session (chunks count as written by 256-byte
@@ -5378,6 +5587,7 @@ static bool guest_direct(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, 
         int k = (int)(o >> gc_shift);
         if ((int)((o + size - 1) >> gc_shift) != k || !gmem_covers(o, size)) return false;  // (crossing chunks: copied)
         if (vcache_lookup(addr, size, buf, off)) return true;
+        if (vtx_must_copy()) return false;
         *buf = gc[k].buf;
         *off = o - ((uint64_t)k << gc_shift);
         return true;
@@ -5387,6 +5597,12 @@ static bool guest_direct(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, 
     if (!GM_IN(addr, size)) return false;
     if (vcache_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
     if (kind == 0 && xm_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
+    if (vtx_must_copy()) {
+        // vcache_lookup refuses whenever gmem_lo != 0 (its own offset math doesn't account for it - see hc_lookup's
+        // comment); hc_lookup is the version that does, keyed on GM_OFF's already gmem_lo-adjusted offset.
+        if (hc_lookup(GM_OFF(addr), size, buf, off)) return true;
+        return false;  // (too big for hc_lookup, or its table/budget is full this submission: the blunt copy)
+    }
     stat_vtx_host += size;
     *buf = gmem_buf;
     *off = GM_OFF(addr);
@@ -5438,6 +5654,7 @@ void vk_exec_reset(void) {
     vc_bytes = 0;
     if (vc_page_gpu) memset(vc_page_gpu, 0, gwin_max / VC_PAGE * sizeof *vc_page_gpu);
     vc_epoch++;
+    hc_reset();  // (the hash-probe vertex / index cache: gmem_buf-relative offsets, invalid once it's replaced above)
     snap_reset();  // (overlap: the storage copies' ring follows the heap, decided again once it is set up)
     st_defaults();
 }
@@ -8156,21 +8373,26 @@ static bool fsr2_copy(Prog *pr) {
                                            .pColorBlendState = &cbs, .pDynamicState = &dy, .layout = layout};
         VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pipe));
     }
-    // camera cuts (another view: a scene change, a cutscene's cut) start FSR 2's history again
+    // camera cuts (another view: a scene change, a cutscene's cut) start FSR 2's history again. mv_vp holds the
+    // reconstruction basis m0..m3 (mv_note_draw): m2 (the "depth" column) is how world position moves per unit of
+    // depth, i.e. roughly the view's forward axis - the same role the old code read off a forward matrix's w row.
     bool reset = mv_frame[1] + 1 != f || fsr2_ok_frame + 1 != f;
     {
-        const float *a = mv_vp[0], *b = mv_vp[1];  // (the view axis: w's row of the projection x view)
-        float la = sqrtf(a[3] * a[3] + a[7] * a[7] + a[11] * a[11]), lb = sqrtf(b[3] * b[3] + b[7] * b[7] + b[11] * b[11]);
-        if (la > 0 && lb > 0 && (a[3] * b[3] + a[7] * b[7] + a[11] * b[11]) / (la * lb) < 0.95f) reset = true;
+        const float *a = mv_vp[0] + 8, *b = mv_vp[1] + 8;
+        float la = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]), lb = sqrtf(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
+        if (la > 0 && lb > 0 && (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb) < 0.95f) reset = true;
     }
     static float react[2] = {-1, -1};
     if (react[0] < 0) {
         react[0] = ENV("LARECOMP_FSR2_REACT_CHAR") ? (float)atof(ENV("LARECOMP_FSR2_REACT_CHAR")) : 0.8f;
         react[1] = ENV("LARECOMP_FSR2_REACT_FOLIAGE") ? (float)atof(ENV("LARECOMP_FSR2_REACT_FOLIAGE")) : 0.2f;
     }
+    // fsr2_mv.frag: inv_cur * ndc reconstructs world position (exactly mv_vp[0]'s own m0..m3 formula - no inversion
+    // needed, it's already the inverse view-projection); prev * world reprojects into the other frame's clip space,
+    // which needs that frame's forward matrix - the inverse of what mv_note_draw stored for it.
     float u[40];
-    inv4(mv_vp[0], u);
-    memcpy(u + 16, reset ? mv_vp[0] : mv_vp[1], 64);
+    memcpy(u, mv_vp[0], 64);
+    inv4(reset ? mv_vp[0] : mv_vp[1], u + 16);
     u[32] = fsr2_jx, u[33] = fsr2_jy, u[34] = 1.0f / w, u[35] = 1.0f / h;
     u[36] = react[0], u[37] = react[1], u[38] = u[39] = 0;
     VkCommandBuffer cb = vk_cmd();
@@ -8212,13 +8434,14 @@ static bool fsr2_copy(Prog *pr) {
     uint64_t now = plat_now_ns();
     float dt = last_ns ? (float)((now - last_ns) / 1e6) : 16.7f;
     last_ns = now;
-    const float *m = mv_vp[0];
-    float p11 = sqrtf(m[1] * m[1] + m[5] * m[5] + m[9] * m[9]);  // (the projection's y scale: the y row's length)
+    // near_z: mv_vp no longer carries a forward projection matrix to read a near plane off - FSR 2's own fallback
+    // (a plausible-enough constant; it only tunes depth-based heuristics inside FSR 2, not the reprojection above).
+    // fov_y: exact now, straight from the cbuf (mv_note_draw's mv_tanfovy), not a matrix-row-length guess.
     VkFsr2Frame fr = {.color = sb->image, .depth = zb->image, .mv = mvb->image, .reactive = rb->image, .out = ob->image,
                       .color_view = cv, .depth_view = zv, .mv_view = post_view(mvb), .reactive_view = post_view(rb), .out_view = post_view(ob),
                       .color_format = sb->format, .depth_format = zb->format, .out_format = VK_FORMAT_R8G8B8A8_UNORM,
                       .w = w, .h = h, .ow = w, .oh = h, .jx = fsr2_jx, .jy = fsr2_jy, .dt_ms = fminf(fmaxf(dt, 1), 100),
-                      .near_z = m[14] > 0 ? m[14] : 0.1f, .fov_y = p11 > 0 ? 2 * atanf(1 / p11) : 1.0f, .sharpness = 0, .reset = reset};
+                      .near_z = 0.1f, .fov_y = mv_tanfovy > 0 ? 2 * atanf(mv_tanfovy) : 1.0f, .sharpness = 0, .reset = reset};
     VkCommandBuffer sec = fsr2_cmd();
     bool ok = vk_fsr2_record(g_vk.phys, g_vk.dev, sec, &fr);
     VK_CHECK(vkEndCommandBuffer(sec));
