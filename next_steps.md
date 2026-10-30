@@ -1,34 +1,64 @@
 # ZA Recomp (Linux / Steam Deck): next steps
 
-**State as of 2026-10-30, end of session - start here.** Branch `linux`, fully committed and pushed: both `github`
-and `gitlab` remotes are at `432f9b5` (push with plain `git push github linux` / `git push gitlab linux` from now
-on - the branch exists on both). `ZA-WORKLOG.md` has the longer history; everything below this paragraph predates
-tonight and is mostly superseded by §1c/§1d/§3/§4/§5 and "Other open items" - read those first.
+**State as of 2026-10-30 evening - start here.** Branch `linux` at `beb06a4`, fully committed and pushed to both
+`github` and `gitlab`. `ZA-WORKLOG.md` has the longer history. This paragraph and the next supersede the "no Deck
+access" paragraph below (same day, later session, real SSH access to the Deck this time) - read this first, then
+§1c/§1d/§3/§4/§5 and "Other open items".
 
-Session was entirely on the dev PC (KnightWing, RX 7800 XT) - **no Deck access this session** (it's at home, the
-user was at work). Three real fixes landed, all local-only validated, **none tested on the Deck yet**:
+**First real Deck validation of the three runtime fixes below, 2026-10-30 evening.** Built a fresh AppImage from
+`beb06a4` (`make appimage`, podman wrapper, ~5 min; version string is `v0.1.12`, GAMELIB_ID unchanged so no player
+recompile needed) and pushed it to the Deck (`run.sh` updated to point at the new file). No physical presence at
+the Deck - driven entirely over SSH, launched into the real gamescope session (`DISPLAY=:0` from
+`/run/user/1000/gamescope-environment`, run as the `deck` user) so it's a real window, not a headless one.
+
+- **Operational note for next time:** the launcher's title screen blocks on a mouse click and SSH has no mouse -
+  pass `--play` on the command line (`./run.sh --play`) to skip straight into the game, same as
+  `LARECOMP_NO_LAUNCHER=1`/`LARECOMP_INPUT` already do for scripted runs (`main.c` ~line 305).
+- **5+ minutes (317 s, ~9500 frames) steady 30 fps, zero crashes, zero hangs, zero device faults, zero dmesg ring
+  timeouts** - idle at the post-load overworld (no controller input was possible over SSH, so no walking/battles,
+  just standing). This clears **both** of the historically fatal windows on **real Vangogh/Mesa hardware** for the
+  first time: the ~20-75 s / frame 300-400 pipeline-compile hang (§1/§1b - the suspect UI shader
+  `b3a5396059fd6d6c` built at frame ~240 this run, same as every past capture, and nothing bad followed) and the
+  ~90 s `gpu_overlap` vertex/index device-lost race (§4, `gpu_overlap = on` + `framegen = 1` both still on in the
+  ini). Clean `SIGTERM` shutdown twice in this session (once from the launcher screen, once after the 317 s run) -
+  no stuck-shutdown repeat either time, though that's not a real test of §5's device-lost path (no crash happened
+  to trigger it).
+- **§3 frame-gen still not confirmed** - `[fg]` never logged once despite `framegen = 1` and `LARECOMP_FG_LOG=1`.
+  Root cause confirmed this time (not just suspected): `ui_window_focused()` reads SDL's actual
+  `SDL_WINDOW_INPUT_FOCUS` flag, and nothing sets it when the window is opened this way - gamescope doesn't hand a
+  raw SSH-launched client real input focus the way it would a game Steam itself launched, so `vk_fg_build`'s focus
+  gate (`exec.c` ~line 9077) never passes. **Same root blocker as the local dev-PC headless testing, just
+  reproduced on the Deck too** - this one genuinely needs a human physically at the Deck (or at least a real input
+  event reaching the window) to validate, not just Deck hardware.
+- **Not yet measured: whether `gpu_overlap = on` is an actual fps win on the Deck**, since idle standing still
+  isn't a real workload (§4's whole open question). Needs the same thing as §3: someone actually walking around.
+- Session's new AppImage and a named copy of its log are on the Deck (`data/lasrecomp.log.run20-v0112-fixes-5min-
+  clean-17h19`) for reference.
+
+---
+
+Previous paragraph (same day, earlier session, dev PC only) for context:
+
+Session was entirely on the dev PC (KnightWing, RX 7800 XT) - no Deck access that session (it's at home, the user
+was at work). Three real fixes landed, all local-only validated at the time:
 
 1. **§3 - Frame-gen motion vectors fixed.** The root cause (reading the wrong constant buffer) is fixed and
    validated (camera data now correctly tracks movement, cross-checked against GTAO's trusted extraction). **Not**
    validated: the actual interpolated-frame pipeline (`vk_fg_build`) never ran even once locally - it needs a
-   really-focused window, which neither `LARECOMP_HIDDEN=1` nor a real window opened headlessly ever got. First
-   thing to check on the Deck (or at a real keyboard): `LARECOMP_FG_LOG=1`, watch for `[fg] frame N: on=1 ... valid=1`
-   and a doubled number in the new "base + generated = total" fps counter.
+   really-focused window, which neither `LARECOMP_HIDDEN=1` nor a real window opened headlessly ever got.
 2. **§4 - GPU overlap's vertex/index device-lost race fixed**, via a new content-hash cache (`hc_lookup`) for when
    the heap import doesn't start at offset 0 (`gmem_lo != 0`, which `LARECOMP_VK_GMEM_WINDOW` - required on the Deck
    - always causes). 170 s local runs with overlap forced on are clean and fast (steady 60 fps, bandwidth back to
-   baseline). **Needs a real Deck run with `gpu_overlap = on`** to confirm it's actually a net win there and not
-   just safe - local hardware has no CPU/GPU-serialization bottleneck for overlap to relieve in the first place, so
-   it can't demonstrate the upside, only that the safety fix doesn't cost much.
+   baseline).
 3. **§5 - The "stuck after a crash, needs SIGKILL" bug fixed** (skip the blocking crash dialog once a device-lost
    GPU is confirmed, poll longer first since a real driver reset isn't instant). Logically sound, cross-checked
-   against a sibling project's identical fix for the identical symptom, but **the device-lost path itself can't be
-   tested without a real hang** - the next time the Deck actually hangs/crashes is the first real test.
+   against a sibling project's identical fix for the identical symptom, but the device-lost path itself can't be
+   tested without a real hang.
 
 Also: tried and **disproved** a theory that the Deck's documented slow fps drift was caused by the vertex cache
 being disabled (bandwidth) - see "Other open items" below. Don't re-investigate that angle without new evidence.
 
-Two new standing rules from the user this session (now in `CLAUDE.md` too): prefer an automatic fix over a new
+Two new standing rules from the user that session (now in `CLAUDE.md` too): prefer an automatic fix over a new
 `LARECOMP_*` env flag, and commit + push every major change rather than letting it sit in the working tree.
 
 Untracked files that are **not ours** (from another session, still untouched): `PROMPT.md`, `ZA-NEMESIS-RE.md`,
