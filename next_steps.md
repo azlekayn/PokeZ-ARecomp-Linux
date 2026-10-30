@@ -35,6 +35,70 @@ the Deck - driven entirely over SSH, launched into the real gamescope session (`
 - Session's new AppImage and a named copy of its log are on the Deck (`data/lasrecomp.log.run20-v0112-fixes-5min-
   clean-17h19`) for reference.
 
+**Then the user showed up in person and actually played - real findings, 2026-10-30 evening continued:**
+
+- **Found and fixed a real ini bug that was making the game feel "slow as hell": `frame_dt = 0` in
+  `data/larecomp.ini`**, against the documented default of `true` (`runtime/settings.c` line 53). With it off,
+  Pokémon Z-A reads its own raw per-frame duration and buckets it into fixed vsync bands (16.67/33.33/50/66.67 ms,
+  `runtime/hle/framepace.c` `rt_za_frame_dt`) instead of a real wall-clock accumulator - ordinary frame-time jitter
+  then constantly under-counts vsyncs (a 33.0 ms frame reads as only 1 vsync's worth of world-time instead of 2),
+  so the game runs in genuine slow motion even while holding a steady 30 fps, and far worse once fps actually drops
+  (16 fps in a busy town - see below). **Fixed by editing the ini directly** (`frame_dt = 0` -> `1`) rather than
+  chasing a launch flag, per the "prefer the automatic/default fix" rule - `true` is already the intended default,
+  this was just a stale toggle. Not yet re-tested after the fix (session moved on to the crash). This does **not**
+  change the `fps60 = 0` (30 fps) target - it only stops the slow-motion that happens when the target isn't held.
+  - The user also mentioned losing 2 Steam launch-option flags that had been present "every day before today" and
+    couldn't recall them. Ruled out `LARECOMP_VK_HEAP_DMABUF`/`LARECOMP_VK_GMEM_WINDOW` as candidates - both were
+    confirmed still active from the crash logs' own boot sequence, and `GMEM_WINDOW` auto-defaults to 256 MB on an
+    integrated GPU regardless (`exec.c` `gmem_window_init`, ~line 3949) so it never needed a flag on this hardware
+    anyway. Best guess is one of the two was `LARECOMP_FRAME_DT=1`, silently overriding the ini bug above every day
+    until it was dropped - now moot since the ini itself is fixed. The second flag is still unidentified.
+- **A real crash happened live, with real forensic value for §1/§1b.** Sequence across three launches in ~3
+  minutes: (1) a clean run the user closed normally; (2) a hard crash - dmesg confirms the **same long-standing
+  §1 ring-timeout hang** (`ring gfx_0.0.0 timeout`, `Ring gfx_0.0.0 reset failed` -> MODE2 reset,
+  `GPU reset(4) succeeded!`, pid 40156, ~25 s into the loading-screen -> town transition, same timing/signature as
+  every past capture) - **not** anything from today's fixes; (3) relaunched, and this time the user watched it
+  happen: **"a few vertex explosions, then everything turned to black and white dots, then the game closed."**
+  - **This is the clearest direct evidence yet for §1b's "stale/garbage buffer read" theory over a missing-barrier
+    theory.** The saved log (`data/lasrecomp.log.run21-v0112-vafault-vertexcorruption-17h26-pid40743` on the Deck)
+    shows the actual fault: `address read invalid 0xffff804002d6f000`, `no object ever held that page in the 5564
+    kept binding events`, **`the fault past its end by 262452668 KB` (~250 GB)**. That magnitude rules out a tight
+    off-by-one or a slightly-stale-but-valid previous frame's data (which a missing barrier would produce) - a
+    read 250 GB past the nearest real allocation looks like a shader dereferencing a numerically-garbage value it
+    found in an uninitialized or wrongly-bound buffer slot, not a synchronization race on otherwise-valid data. The
+    visual symptom (exploded geometry, then static) fits: garbage vertex positions, then garbage pixel data, then
+    the GPU faults on a garbage pointer a shader tried to read through.
+  - **`GPU overlap` was explicitly logged as `off`** in this fault's state dump (`F1 > Rendering > Compatibility`
+    line) - so this specific crash is independent of §4's overlap work, consistent with §1's existing "reproduces
+    with `gpu_overlap` both on and off" finding. Not a regression from today.
+  - **§5's crash-dialog fix fired correctly for the first time on a real crash** - the log has the full
+    `vk_fatal_device_lost` sequence (`[vk] r: device lost`, the device fault report, the devlost trace dump) right
+    before the process exited, matching the user's own description exactly (froze briefly - the new up-to-60s
+    patient poll - then closed itself, no dialog, nothing to force-quit). This is the first real-world confirmation
+    §5 works as intended.
+  - **Sequence leading to the fault** (from the devlost trace, same log): a long run of GPU-indirect foliage/culling
+    draws (`args now: <count> 0 <first> 0 <binst>`, binst in the 200-260k range, matching §1b's "grass/foliage-style
+    instanced draws" pattern) -> a compute dispatch (`dispatch 244x1x1 cs ... gmem 1`) -> a small `256x256` pass ->
+    the main `1920x1080` color pass -> **a depth-only pass (`color 0x0 fmt 0`, likely a shadow map)** -> the fault,
+    on a **non-indirect** draw (pipeline `vh 9c1a6a0125797441 fh d4f2e43272162253`) inside that depth-only pass.
+    This refines §1b's earlier "compute dispatch then the main pass" capture: here the fault is specifically in a
+    *shadow/depth-only* pass that comes *after* the main color pass, not in the main pass itself. Read `begin_pass()`
+    (`exec.c` ~line 1550) and `dispatch_compute()` (~line 6351) during this session: `dispatch_compute` correctly
+    calls `vk_end_pass()` before dispatching and `vk_full_barrier()` after, and that `vk_end_pass()` clears `in_pass`
+    so `begin_pass()`'s same-render-target early-return (`if (in_pass && !st.rt_dirty) return;`, line 1551) can't
+    skip the barrier on the next draw either - the barrier placement around dispatches looks correct on inspection,
+    which doesn't rule out a narrower case but didn't turn up an obvious gap this time.
+  - **Not yet identified: what `vh 9c1a6a0125797441 fh d4f2e43272162253` actually is.** It wasn't a first-visit this
+    session (already warm from the pipeline cache, 8991552 bytes loaded at boot), so `LARECOMP_DEBUG_PIPELINE_HASH`
+    didn't catch its shape this time. Next real repro: clear `cache/shader_seen.txt` and `cache/shader_code.bin` (or
+    just get a first-visit log) with `LARECOMP_DEBUG_PIPELINE_HASH=9c1a6a0125797441` set, to decode what this
+    pipeline actually draws (shadow caster geometry is the obvious guess given the pass shape, not confirmed).
+  - All three logs from this live session preserved on the Deck: `lasrecomp-backup-20261030-172510-38299.log` (clean
+    close), `lasrecomp-backup-20261030-172538-40156.log` (the ring-timeout hang, cuts off with no FATAL - the actual
+    GPU-level crash, not caught by `vk_fatal_device_lost` since the ring reset path doesn't go through it the same
+    way), `lasrecomp.log.run21-v0112-vafault-vertexcorruption-17h26-pid40743` (the VA-fault crash with the full
+    device-lost report, described above).
+
 ---
 
 Previous paragraph (same day, earlier session, dev PC only) for context:
