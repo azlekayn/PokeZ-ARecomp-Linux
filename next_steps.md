@@ -344,32 +344,179 @@ code directly via the documented dev workflow (`tools/gen.py` + `make`), bypassi
   reallocation, or gwin aliasing).
 - **Next:** a devcoredump or `RADV_DEBUG=hang` run will show which target it is.
 
-## 3. Frame-gen motion vectors are about 0 (the real frame-gen blocker)
+## 3. Frame-gen motion vectors were about 0 - fixed locally 2026-10-30, not yet Deck-tested
 
-- **Symptoms:** the largest motion vector is about 0.2 px, which is just the TAA jitter. With
-  `LARECOMP_FG_DUMP`, `fg_gen.png` was byte-identical to `fg_cur.png`.
-- **What `mv_note_draw` does:** it takes `st.ubuf[0][2]` (vertex cb5) from the first draw each frame that has 4+
-  colour targets, and treats it as the view-projection. That is probably the wrong matrix, or a fixed-camera
-  pass.
-- **Better lead:** GTAO reads the lighting pass's fragment cb2 (`st.ubuf[1][2]`):
-  - rows 12-15 are a matrix
-  - row 19 is the camera position
-  - rows 20-21 hold tan(fov)
-- **Next:**
-  1. Do a `LARECOMP_MV_LOG=1500` run, turning the camera between about 45 s and 2 min.
-  2. Find the cbuf/row whose matrix changes with the camera, and switch `mv_note_draw` to it.
-  3. Restrict the motion-vector pass to the content region: the scene fills only part of its targets
-     (0.667 scale).
+- **Was:** `mv_note_draw` read `st.ubuf[0][2]` (vertex cb5) off the first draw each frame with 4+ colour targets (a
+  G-buffer heuristic) and treated it as the view-projection. Motion vectors came out ~0 - either the wrong matrix
+  or a fixed-camera pass.
+- **Fix:** `mv_note_draw` (`exec.c`) now triggers on `gtao_is_lighting(pr)` (the same lighting-pass detection GTAO
+  uses - works whether or not ambient_occlusion/indirect_light/water_reflections are even on, via the hardcoded
+  `GTAO_LIGHTING` fragment-shader hash) and reads the exact same cbuf GTAO already trusts (`st.ubuf[1][2]`,
+  fragment cb2 of that draw): rows 12-15 (`m0..m3`), row 19 (camera position), rows 20-21 (tan half fov x/y).
+  That block is **not a conventional view-projection** - it's the game's own `world_pos = ndc.x*m0 + ndc.y*m1 +
+  depth*m2 + m3` reconstruction, i.e. already the *inverse* of a view-projection, column-packed. `fsr2_copy`
+  (which builds `fsr2_mv.frag`'s `inv_cur`/`prev` uniforms) had to flip which matrix gets `inv4()`'d: `inv_cur` is
+  now a straight copy of `mv_vp[0]` (no inversion - it already is the inverse), and `prev` is `inv4()` of the
+  *other* frame's stored matrix (to turn its inverse-VP back into a real forward VP). The camera-cut heuristic
+  (dot product threshold for an FSR 2 history reset) now reads the `m2` depth-basis column's xyz instead of the
+  old matrix's w-row, and `fov_y` uses the captured tan(half fov) directly instead of guessing it from a matrix
+  row's length; `near_z` has no clean source in this data any more, so it's just the existing 0.1 fallback.
+- **Known gap:** `gtao_is_lighting`'s *heuristic* fallback (for lighting-pass variants during moves/Pokémon
+  send-outs, per its own comment) only runs when `gtao_on()||ssgi_on()||water_on()` is true - with all three off,
+  motion vectors may briefly stop updating during those specific animations (the hash-based fast path still
+  covers the common case). Not fixed; narrow enough to leave for now.
+- **Tested locally (dev PC, RX 7800 XT, v0.1.12 rebase, scratch save/ini - never the real ones):** three headless
+  native runs, zero crashes. `LARECOMP_MV_LOG` showed the captured camera position tracking real movement frame
+  to frame (a ~700-unit jump right after spawn/load, then small smooth per-frame deltas while walking) and
+  matched GTAO's own independently-logged camera position exactly (`[gtao] on: ... camera (-0.0, 0.5, 2.5)` vs.
+  `[mvlog]`'s same value same frame) - strong cross-confirmation the right cbuf is being read.
+- **Not yet confirmed:** `vk_fg_build` (the actual interpolated-frame draw) needs `ui_window_focused()==true`, and
+  neither a `LARECOMP_HIDDEN=1` run nor a real on-screen window opened headlessly on this dev box ever received
+  real input focus (`[fg]`'s own frame-by-frame log, which fires unconditionally for the first 6 frames once
+  `vk_fg_build` runs past that check, never printed once in any run). So the motion-vector *data* is verified
+  correct; the full presentation path (frame actually gets interpolated and shown) is not, and needs either a
+  real focused window (someone at the keyboard) or the Deck.
+- **Also added:** the F1 "Show FPS" overlay now shows `base + generated = total` fps when frame generation is on
+  (`device.c`'s `fg_rate_note`/`vk_fg_present_rate`: a rolling rate of the generated frame's own successful
+  presents, 0 once they stop landing rather than a stale number) instead of just the base rate - for exactly this
+  kind of "is it actually doubling the frame rate" check, without reading the log.
+- **Next:** play it for real (Deck or local with focus) with `LARECOMP_FG_LOG=1` and watch for `[fg] frame N:
+  on=1 ... valid=1` and a doubled fps in the corner counter; `LARECOMP_FG_DUMP=<frame>` to compare `fg_cur.png`
+  vs `fg_gen.png` (should differ now, not be byte-identical).
+
+## 4. CPU/GPU overlap's vertex/index race - fixed locally 2026-10-30, not yet Deck-tested
+
+GPU overlap (`gpu_overlap`/`LARECOMP_GPU_OVERLAP`) is the single biggest known Deck fps lever (ZA-WORKLOG.md: 44 ->
+51-55 fps), but ships off by default because of a real device-lost bug after ~90 s: without the storage write watch
+(the Deck's RADV fix always means no watch - `LARECOMP_VK_HEAP_DMABUF=0`), nothing caught the game rewriting its
+per-frame vertex/index data while the GPU still read the OLD frame's *in-place* binding of it - the same unwatched-
+rewrite race `snap_storage`'s `RS_PROBE` already had to solve for storage buffers, just never extended to vertex /
+index data at all (it was bound straight from the guest heap unconditionally, every draw, no protection whatsoever).
+
+- **First attempt (`vtx_must_copy`, `exec.c`):** when overlap is on and there's no write watch, refuse the in-place
+  bind and force the existing `vk_transient_copy` fallback instead - correct (170 s clean run locally, no crash,
+  vs. the historical ~90 s), but **~15x the upload bandwidth** on a busy scene (measured: ~750-1100 MB/2s baseline
+  vs. ~15,000 MB/2s with this on) and a real local fps hit (60 -> 42-50), because it copies *everything* every
+  frame, including world geometry that's static forever. Kept as the fallback for ranges the smarter path below
+  can't handle (oversized, or its table is full this submission).
+- **Second attempt (`vc_hash_mode`, inside the existing `vcache_lookup`/`vc_tab`):** reuse the vertex cache's own
+  buffer pool, but decide staleness with a content hash (`range_hash`, already used by `snap_storage`) instead of
+  OS dirty-page bits, so a genuinely static range costs one copy ever, not one a frame. **Turned out to be dead
+  code on the Deck's own configuration**: `vcache_lookup` has a pre-existing `|| gmem_lo ||` early-exit, because its
+  offset math (`lo = addr - gwin_base`) was never adjusted for a non-zero `gmem_lo` - and `LARECOMP_VK_GMEM_WINDOW`
+  (required on the Deck) always makes `gmem_lo != 0` (confirmed via `LARECOMP_VK_PROF=1` telemetry: `gmem_lo` was
+  2965 MB in a local repro of the Deck's settings, and `vcache N hit N copied` sat at `0 0` for an entire run).
+  Left in place anyway (harmless, and still useful on any Linux/AMD config that doesn't need `GMEM_WINDOW`), but it
+  doesn't help the one configuration this was for.
+- **Third attempt (`hc_lookup`/`hc_flush`/`hc_reset`, `exec.c`), the one that actually works there:** a second,
+  independent content-hash cache, keyed on `GM_OFF`-adjusted offsets (i.e. correct under `gmem_lo != 0`), mirroring
+  `vc_tab`'s buffer-lifetime pattern (LRU, a dead-list freed only once `vk_completed_seq()` passes a buffer's last
+  use) but with its own pool - the two offset spaces aren't comparable, so it isn't shared with `vc_tab`.
+  - An independent review (a fresh agent, no shared context, asked to adversarially check address math, buffer
+    lifetime, and the "GPU-ordered copy can't race its own reads" safety argument) caught a real bug before this
+    shipped: `hc_flush`'s content hash is a raw CPU pointer dereference, and `gmem_copy`'s `vkCmdCopyBuffer` has no
+    fence of its own - both fine for a CPU rewrite (that's exactly the race they protect against), but **not safe
+    against a range a compute/vertex shader is still writing** (Z-A does this for real: skinned character output
+    read straight back as vertex data - see the `exec.c` comment on `vc_mark_sbufs`). The *first* blunt
+    `vtx_must_copy` attempt had this identical bug too, silently, from the start (a plain `memcpy`, zero GPU-write
+    awareness) - it just never showed up as a crash in testing, only as a possible stale/torn pose for a frame.
+  - Fixed: `hc_lookup` now checks the vertex cache's own GPU-written page table (`vc_page_gpu`, the same one
+    `vcache_lookup`'s `e->gpu` bypass reads, translated to heap-relative via `+ gmem_lo`) before touching anything,
+    and for a known-GPU-written range just binds the import directly - free, and correct by construction (a GPU
+    write and a later GPU read of it are already ordered by the queue on their own, no CPU involvement needed).
+  - **Result after the fix, 170 s local run, overlap forced on, no write watch:** zero crashes, upload bandwidth
+    ~700-1000 MB/2s (matching the no-overlap baseline almost exactly, down from the blunt version's ~15,000), and
+    **60 fps steady** for most of the run (vs. 42-54 fps with either earlier attempt) - the GPU-written bypass alone
+    recovered real cost, since Z-A's skinned meshes would otherwise have been needlessly hash-cached or copied.
+- **Not yet confirmed:** all of this was tested on a dev PC (RX 7800 XT, Linux/AMD so genuinely has no write watch,
+  matching the Deck's situation) which has no CPU/GPU-serialization bottleneck for overlap to relieve in the first
+  place - a local fps measurement with overlap on literally cannot show the win this exists for, only the cost of
+  keeping it safe (which is now small). The Deck is the only place that can confirm whether turning `gpu_overlap`
+  on, with this fix, is a net win over 30 fps default. Try it there before changing `gpu_overlap`'s shipped default.
+- **`guest_direct`'s `gc_lazy` branch (macOS's lazy heap-chunk path) still has the plain blunt `vtx_must_copy`
+  fallback, unprotected against the same GPU-write case** - not fixed, since it's not Linux/Deck and untestable
+  from here; worth the same `hc_maybe_gpu`-style check if someone picks this up on macOS.
+
+## 5. The "stuck after a crash, needs SIGKILL" bug - fixed 2026-10-30 (via totk-recomp cross-reference)
+
+**totk-recomp** (github.com/Muhammad1259-sigma/totk-recomp, Tears of the Kingdom on Steam Deck) ports its NVN-on-
+Vulkan layer from the same upstream LAS Recomp we do - a sibling project, not a fork of ours, but close enough in
+lineage that its own extensive GPU-hang debugging (same timeframe as ours) is worth cross-checking. Its hang handler
+goes straight to `_exit()` on a confirmed device-lost GPU, no crash dialog. That's the fix for our own long-standing
+"stuck after a crash, needs SIGKILL" symptom: `FATAL()`'s `plat_fatal_notice()` shows a blocking
+`SDL_ShowSimpleMessageBox` on *every* fatal error, including device-lost - and right after a GPU reset the
+window/surface can be in a state where that dialog never actually displays or can't be dismissed, which looks
+exactly like the whole process hanging (and explains why every case we've hit it in was an unattended/scripted run
+or a fullscreen game nobody was watching for a hidden dialog).
+
+- **New `vk_fatal_device_lost(what)`** (`device.c`): logs the device fault report and the devlost trace/checkpoints
+  (unchanged, already reused), then `_exit(5)` directly - no notice dialog, no further Vulkan or window-system calls
+  of any kind once the device is confirmed gone.
+- **Wired into every confirmed-`VK_ERROR_DEVICE_LOST` site**: the generic `VK_CHECK` macro (`vk.h` - this alone
+  covers every Vulkan call in the codebase that can return it), `vk_wait_seq`'s device-lost branch, the present path
+  (`record.c`), and frame generation's queue submission (`device.c`).
+- **`vk_wait_seq`'s plain `VK_TIMEOUT` case also changed**, separately from the confirmed-lost case above: a 10 s
+  `vkWaitSemaphores` timeout is ambiguous, not a confirmed loss - an amdgpu ring-timeout reset or a Windows TDR isn't
+  instant and can still be mid-recovery past 10 s (totk-recomp's own handler measured a ~100 s Windows TDR). Old
+  behavior: fatal immediately at 10 s, possibly while the driver is still resetting - likely making the dialog-hang
+  problem worse, not just coincidental with it. New: poll up to 60 s more (checking `vkGetSemaphoreCounterValue` for
+  a confirmed loss along the way); if the GPU actually finishes in that window, log it and carry on instead of
+  killing a session that would have recovered on its own.
+- **Not device-lost-specific, but checked while here: we already have `VK_NV_device_diagnostic_checkpoints`**
+  (`device.c` `vk_checkpoint`/`vk_checkpoints`, wired into `exec.c`'s draw/dispatch call sites, read by
+  `vk_devlost_dump` under `LARECOMP_VK_DEVLOST_TRACE`) - equivalent to totk-recomp's own checkpoint use, already in
+  place and already central to this week's §1/§1b GPU-hang investigation. Nothing to add there.
+- **Tested:** compiles clean, a normal 30 s local smoke run is unaffected (no behavior change on the happy path, as
+  expected - this only touches the already-fatal device-lost/hang paths). The actual device-lost path itself is
+  **not** independently verified - that needs a real GPU hang to hit, which isn't something to deliberately trigger
+  locally. Next real Deck crash is the first live test of whether this actually stops the stuck-shutdown symptom.
+- **Open question, not acted on (no Deck access to test it)**: totk-recomp's comment says userptr heap imports cause
+  "Deck v2's 6 s kernel stall" via the MMU notifier, and defaults to dma-buf instead - the *opposite* of our own
+  Deck fix, which forces `LARECOMP_VK_HEAP_DMABUF=0` (userptr) because dma-buf was what hung for us. Could be a
+  hardware-revision (LCD vs OLED Deck) or Mesa-version difference, or two genuinely different bugs each project
+  independently routes around. Don't change our default on this alone; worth asking if the hang ever shows up on an
+  OLED Deck specifically.
+- **totk-recomp's "device window" (`gw_overlap`/`gdev_reg`) - read in full, tried porting its core idea, measured it
+  worse, reverted.** It's a single pre-allocated device-local buffer split into two halves used in turn: a region
+  gets offsets carved out of the current half, and when a half fills, the *other* half is reclaimed as a whole (wait
+  once for its last user, then every region in it is simply forgotten) - no per-range VkBuffer/VmaAllocation churn,
+  and a small linear region list instead of a hash table (their own choice, measured ~1us/draw at 256 entries).
+  Rebuilt `hc_lookup`/`hc_flush` this way (2026-10-30) to avoid `hc_lookup`'s original per-range VMA buffer
+  create/destroy cost. An independent review of the port found one real bug (`hc_npend` could overflow without the
+  caller noticing, serving a region with stale/uninitialized contents for one frame - the same fix applies to the
+  reverted-to version below, see next bullet) and confirmed the rest correct. **But a same-test A/B measured it
+  clearly worse**: ~14 GB/2s upload bandwidth, almost back to the blunt always-copy version's, vs. ~800 MB/2s before
+  and after. Root cause understood, not just observed: totk-recomp's window protects a handful of small, short-lived
+  storage buffers, where "presume a whole half's regions stale on every flip" is a fine tradeoff; this one needs a
+  large, mostly-*static* vertex/index working set to stay resident for as long as it keeps being drawn, and
+  discarding half of it on every flip - whether or not anything in it actually changed - defeats exactly the
+  caching this exists for. **Reverted to the original per-range VMA buffer + true LRU** (only ever evicts the
+  genuinely least-recently-used entry, never a whole batch): confirmed back to ~800-1000 MB/2s, zero crashes, and
+  this time a steady 60 fps for the full 170 s run (better than either earlier attempt - the LRU design turned out
+  to also scale better than the blunt version's heavier, evenly-spread copy cost). Also applied the overflow fix
+  found during the review to this reverted version too (`hc_lookup`'s re-used-entry path now also refuses rather
+  than silently skipping the queue when `hc_pend` is full - a latent gap in the very first version of this, not
+  introduced by the ping-pong attempt, just surfaced by the same review).
+  - **Lesson for next time an architecture from a sibling project looks appealing**: port the idea, but re-derive
+    whether its *tradeoffs* (not just its mechanism) fit this codebase's actual workload before trusting it - and
+    measure, don't just reason about it. This was caught by running the same test script before and after, not by
+    the correctness review (which passed the ping-pong version with only the one unrelated bug).
+  - Their broader "device window" is still a real, more unified design than this codebase's separate
+    `vcache_lookup`/`snap_storage`/`hc_lookup` mechanisms for the GPU-written-storage-buffer case specifically
+    (which does need read-back, unlike vertex/index data) - just not a fit for `hc_lookup`'s own job. Still worth a
+    look for `snap_storage` specifically, another time, not tonight.
 
 ## Other open items
-
-- **Overlap's vertex/index race:** device-lost after about 90 s; unfixed.
 - **Royale randomizer probably never fires:** `fs.c` `za_royale_read` looks for a loose `trdata_array.bin`, but
   that file is inside `arc/data.trpfs`.
-- **Unmerged reviewer branch** `worktree-agent-ad664600080292dcf`:
-  - Has a settings clamp, a duplicate `temporal_aa` line, and Python tidy-ups. Its two frame-gen fixes are
-    already applied.
-  - Notes from it: `_za_frame_measured` is dead code, and the Metal backend still needs the UI scale.
+- **Unmerged reviewer branch** `worktree-agent-ad664600080292dcf`: stale (forked long before the v0.1.12 rebase -
+  diffing it against `linux` is mostly *missing* work, not ahead of it; don't merge it wholesale). Its small,
+  still-applicable fixes were cherry-picked by hand 2026-10-30: the `za_royale_delta` load-time clamp and the
+  duplicate `temporal_aa` save line (`settings.c`), `royale_randomizer.py`'s two unclosed-file opens (the second
+  one was a real race - flatc could read the json before Python flushed it), the env-override comment, and a
+  `black2`/`black` duplicate-constant dedupe in `device.c`'s frame-gen present path. Nothing left to pull from it.
+  - Notes from it, not yet looked at: `_za_frame_measured` is dead code, and the Metal backend still needs the UI
+    scale.
 - **Small flyouts** (916x172, 340x164...) are unscaled layers. They are fine at 1:1 but would stay soft at higher
   desktop scales.
 - **Deck GPU clock:** auto DPM holds 1040 MHz; forcing high gives +22%.
