@@ -1,30 +1,39 @@
 # ZA Recomp (Linux / Steam Deck): next steps
 
-State as of 2026-10-29. Branch `linux` (tracks `gitlab/main`); both remotes (`github`, `gitlab`) are at `a957e0e`.
-Push with `git push github linux:main` and `git push gitlab linux:main`. `ZA-WORKLOG.md` has the longer history.
+**State as of 2026-10-30, end of session - start here.** Branch `linux`, fully committed and pushed: both `github`
+and `gitlab` remotes are at `432f9b5` (push with plain `git push github linux` / `git push gitlab linux` from now
+on - the branch exists on both). `ZA-WORKLOG.md` has the longer history; everything below this paragraph predates
+tonight and is mostly superseded by §1c/§1d/§3/§4/§5 and "Other open items" - read those first.
 
-## Uncommitted work (in the working tree, built, running on the Deck as AppImage 59aa0269)
+Session was entirely on the dev PC (KnightWing, RX 7800 XT) - **no Deck access this session** (it's at home, the
+user was at work). Three real fixes landed, all local-only validated, **none tested on the Deck yet**:
 
-8 files, about +131/-8. Commit these once the GPU hang below is fixed (or as a WIP now, so they aren't lost):
+1. **§3 - Frame-gen motion vectors fixed.** The root cause (reading the wrong constant buffer) is fixed and
+   validated (camera data now correctly tracks movement, cross-checked against GTAO's trusted extraction). **Not**
+   validated: the actual interpolated-frame pipeline (`vk_fg_build`) never ran even once locally - it needs a
+   really-focused window, which neither `LARECOMP_HIDDEN=1` nor a real window opened headlessly ever got. First
+   thing to check on the Deck (or at a real keyboard): `LARECOMP_FG_LOG=1`, watch for `[fg] frame N: on=1 ... valid=1`
+   and a doubled number in the new "base + generated = total" fps counter.
+2. **§4 - GPU overlap's vertex/index device-lost race fixed**, via a new content-hash cache (`hc_lookup`) for when
+   the heap import doesn't start at offset 0 (`gmem_lo != 0`, which `LARECOMP_VK_GMEM_WINDOW` - required on the Deck
+   - always causes). 170 s local runs with overlap forced on are clean and fast (steady 60 fps, bandwidth back to
+   baseline). **Needs a real Deck run with `gpu_overlap = on`** to confirm it's actually a net win there and not
+   just safe - local hardware has no CPU/GPU-serialization bottleneck for overlap to relieve in the first place, so
+   it can't demonstrate the upside, only that the safety fix doesn't cost much.
+3. **§5 - The "stuck after a crash, needs SIGKILL" bug fixed** (skip the blocking crash dialog once a device-lost
+   GPU is confirmed, poll longer first since a real driver reset isn't instant). Logically sound, cross-checked
+   against a sibling project's identical fix for the identical symptom, but **the device-lost path itself can't be
+   tested without a real hang** - the next time the Deck actually hangs/crashes is the first real test.
 
-- **HUD split ("UI scale")**: the HUD renders at the presented size while the scene is scaled.
-  - `NvnTexture.window` is set in `objects.c` `nvnWindowInitialize`.
-  - `TexBackend.ui` is in `vk.h`.
-  - `textures.c`: `g_ui_x`/`g_ui_y`, `renderer_set_ui_scale`, and `tex_ui()`, used in `create_image`, the
-    `tex_backend` reallocation check, and `renderer_mark_gpu_owned`. `LARECOMP_UI_NATIVE=0` turns it off.
-  - `device.c` computes `uy = vh / present crop height`, active only when it is above the scene scale, and logs
-    `[scale] UI ...`.
-  - The user said it was "much sharper"; flyouts are fine.
-- **Handheld 480p fix** (`output_scale.c`): `h = mode==1 && g_gpu_integrated && !hh ? 720/1080 : mode`. In
-  handheld, 1x was scaling twice (0.667 of the 720 crop gave 854x480).
-- **Menu "Rendering at"** (`menu.mm`): reports the picture size from `g_present_crop`.
-- **Diagnostics** (can be removed or kept behind their env vars):
-  - `LARECOMP_VK_LOG_PRESENT_PASSES` (begin_pass)
-  - `LARECOMP_VK_LOG_UI_SOURCES` (texture_info)
-  - `LARECOMP_MV_LOG=<frame>` (`exec.c` `mv_note_draw`)
+Also: tried and **disproved** a theory that the Deck's documented slow fps drift was caused by the vertex cache
+being disabled (bandwidth) - see "Other open items" below. Don't re-investigate that angle without new evidence.
 
-Untracked files that are **not ours** (from another session): `ZA-NEMESIS-RE.md`, `runtime/hle/za_worklog.c`,
-`.claude/`. Never commit them.
+Two new standing rules from the user this session (now in `CLAUDE.md` too): prefer an automatic fix over a new
+`LARECOMP_*` env flag, and commit + push every major change rather than letting it sit in the working tree.
+
+Untracked files that are **not ours** (from another session, still untouched): `PROMPT.md`, `ZA-NEMESIS-RE.md`,
+`runtime/hle/za_worklog.c`. Never commit them. (A related mod idea the user is tracking separately, not part of
+this repo's code: a "Nemesis system" for trainer AI - see this session's memory, not here.)
 
 ## 1. GPU hang about 20-60 s into a run (top priority)
 
