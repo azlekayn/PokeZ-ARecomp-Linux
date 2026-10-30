@@ -1608,6 +1608,34 @@ static const char *pp_text(void) {
     return s;
 }
 
+// Frame generation's own presented rate (menu.mm's FPS overlay, "+N generated" when Frame generation is on): rolling,
+// like menu.mm's fps_note, but counting only this present's own successful hits below - a dropped generated frame (no
+// free window image: fg_dropped) doesn't count, so a GPU too slow to keep up shows the rate it's actually landing on
+// screen, not the rate it's attempting.
+static float fg_rate_dt[60];
+static int fg_rate_n, fg_rate_i;
+static double fg_rate_sum, fg_rate_shown, fg_rate_at;
+static uint64_t fg_rate_last_ns;
+static void fg_rate_note(void) {
+    uint64_t now_ns = SDL_GetTicksNS();
+    if (fg_rate_last_ns) {
+        float dt = (float)((now_ns - fg_rate_last_ns) / 1e9);
+        if (fg_rate_n == 60) fg_rate_sum -= fg_rate_dt[fg_rate_i];
+        else fg_rate_n++;
+        fg_rate_dt[fg_rate_i] = dt;
+        fg_rate_sum += dt;
+        fg_rate_i = (fg_rate_i + 1) % 60;
+    }
+    fg_rate_last_ns = now_ns;
+    double now_s = (double)now_ns / 1e9;
+    if (now_s - fg_rate_at >= 0.5 || now_s < fg_rate_at) fg_rate_at = now_s, fg_rate_shown = fg_rate_sum > 0 ? fg_rate_n / fg_rate_sum : 0;
+}
+// 0 once generated frames stop landing for a while (frame generation off, or every recent one dropped) instead of
+// holding the last number forever.
+float vk_fg_present_rate(void) {
+    return (!fg_rate_last_ns || SDL_GetTicksNS() - fg_rate_last_ns > 750000000ull) ? 0 : (float)fg_rate_shown;
+}
+
 // The GPU side of a present (the render thread when it's on, rqueue.c): the present pass, the overlay, shots.
 // frame: the number of this present (the game thread's frame when it was queued).
 void backend_present_now(NvnTexture *t, uint64_t frame) {
@@ -1771,6 +1799,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 // hand it to the game's next one)
                 if (rec_on() && mid != -1) rec_next_present_gap(mid == -3 ? 1 : (uint64_t)mid);
                 vk_frame_end(NULL);
+                fg_rate_note();
             } else fg_dropped++;
         }
         // (overlap) the game's frame ends here, with the generated frame's present when there is one: a fence the

@@ -27,6 +27,7 @@ extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.c
 extern "C" void *vk_overlay_begin(void *window_cmd);
 extern "C" void vk_overlay_end(void *window_cmd, void *cmd);
 extern "C" int vk_hdr_state(void);  // device.c: 0 the display isn't in HDR mode, 1 it is, 2 HDR output on
+extern "C" float vk_fg_present_rate(void);  // device.c: generated frames actually landing on screen per second (0: off / none recently)
 #endif
 
 extern "C" {
@@ -1293,8 +1294,9 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
             pthread_mutex_lock(&q_lock);
             bool events = !q_events.empty();
             pthread_mutex_unlock(&q_lock);
-            if (!events) snprintf(key, sizeof key, "%.0fx%.0f fps %d %.0f | %s", tw, th, (int)g_settings.show_fps,
-                                  g_settings.show_fps ? g_fps_shown : 0.0, rk);
+            float fg_shown = g_settings.show_fps && g_settings.framegen ? vk_fg_present_rate() : 0;
+            if (!events) snprintf(key, sizeof key, "%.0fx%.0f fps %d %.0f %.0f | %s", tw, th, (int)g_settings.show_fps,
+                                  g_settings.show_fps ? g_fps_shown : 0.0, fg_shown, rk);
         }
         ImDrawData *dd = ImGui::GetDrawData();
         if (key[0] && g_ov_same >= 3 && !strcmp(key, g_ov_key) && dd && dd->Valid) {
@@ -1351,7 +1353,14 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::SetNextWindowBgAlpha(0.5f);
         ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-        ImGui::Text("%.0f fps", g_ov_cache ? g_fps_shown : io.Framerate);
+        float base = g_ov_cache ? g_fps_shown : io.Framerate;
+        // Frame generation presents a second image between two of the game's own (device.c fg_rate_note): base is the
+        // game's own rate (what menu_render / fps_note sees - the generated frame replays the same overlay draw rather
+        // than running this again), gen is how many of those extra frames are actually landing on screen (0 once they
+        // stop: a dropped one, or the feature off, isn't still "pending" forever).
+        float gen = g_settings.framegen ? vk_fg_present_rate() : 0;
+        if (gen > 1.0f) ImGui::Text("%.0f + %.0f = %.0f fps", base, gen, base + gen);
+        else ImGui::Text("%.0f fps", base);
         ImGui::End();
     }
 

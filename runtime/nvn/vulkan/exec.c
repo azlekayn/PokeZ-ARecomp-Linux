@@ -3154,52 +3154,48 @@ void vk_exec_texture_destroyed(NvnTexture *t) {
 }
 void vk_alias_reset(void) { naliases = 0; }  // (reboot: every texture goes)
 
-// ---- FSR 2 (fsr2_frame): the scene camera per frame - the view-projection in vertex constant buffer 5 of the
-// G-buffer draws (4+ colour targets) - and their depth target.
+// ---- FSR 2 (fsr2_frame): the scene camera per frame, and its depth target.
+// 2026-10-29: this used to read vertex cb5 of the first draw into 4+ colour targets (the G-buffer), on the theory
+// that its clip position is cb5[0..3] (rows) x the model matrix (cb10) - a plausible-looking, invertible matrix, but
+// the motion vectors it produced came out ~0: either the wrong matrix or a fixed-camera pass. The lighting pass's own
+// camera reconstruction (gtao_before_lighting, fragment cb2 of the GTAO_LIGHTING draw) is proven correct instead -
+// GTAO's world positions from it are visibly right - so this now reads that: NOT a conventional view-projection, but
+// the game's own world_pos = ndc.x*m0 + ndc.y*m1 + depth*m2 + m3 reconstruction basis (already the INVERSE of a
+// view-projection, column-packed). fsr2_copy below inverts the *other* way around now because of that.
+static bool gtao_is_lighting(Prog *pr);
+static NvnTexEntry *gtao_tex_entry(ShaderInfo *si, int i);
+static float mv_tanfovy;  // tan(half fov y) this frame, straight from the cbuf (fsr2_copy's fov_y - exact, not a matrix-row guess)
 static void mv_note_draw(Prog *pr) {
     extern uint64_t vk_frame_counter(void);
     uint64_t f = vk_frame_counter();
-    int n = 0;
-    for (int i = 0; i < 8; i++) n += st.rt.color[i] != NULL;
-    // (the shaders' constant buffer k is the stage's binding k - 3: cbuf_info. The G-buffer vertex shaders' clip
-    // position is cb5[0..3] (rows) x their model matrix, cb10)
-    {   // (debug) LARECOMP_MV_LOG=<frame>: 4 frames from it, again every 300 (6 times): every draw into 4+ colour targets and a depth (the
-        // G-buffer's, or anything shaped like it): its depth's size and each vertex constant buffer's first 16 floats -
-        // which one is the scene camera's view-projection (mv_vp: the motion vectors came out ~0 in Z-A, 2026-10-29)
-        static long at = -2;
-        if (at == -2) at = ENV("LARECOMP_MV_LOG") ? atol(ENV("LARECOMP_MV_LOG")) : -1;
-        static uint64_t lf;
-        static int nd;
-        if (at >= 0 && f >= (uint64_t)at && (f - (uint64_t)at) % 300 < 4 && (f - (uint64_t)at) / 300 < 6 && n >= 4 && st.rt.depth) {
-            if (lf != f) lf = f, nd = 0;
-            if (nd++ < 6) {
-                TexBackend *db = st.rt.depth->backend;
-                LOG("[mvlog] frame %llu draw %d: %d colour, depth %ux%u, fs %016llx\n", (unsigned long long)f, nd, n,
-                    db ? db->width : 0, db ? db->height : 0, (unsigned long long)g_cur_fs_hash);
-                for (int k = 0; k < 18; k++) {
-                    if (!st.ubuf[0][k].addr || st.ubuf[0][k].size < 64) continue;
-                    const float *u = (const float *)(uintptr_t)st.ubuf[0][k].addr;
-                    char line[400];
-                    int o = snprintf(line, sizeof line, "[mvlog]   cb%d (%llu bytes):", k + 3, (unsigned long long)st.ubuf[0][k].size);
-                    for (int i = 0; i < 16 && o < (int)sizeof line - 16; i++) o += snprintf(line + o, sizeof line - (size_t)o, " %.4g", u[i]);
-                    LOG("%s\n", line);
-                }
-            }
-        }
-    }
-    if (mv_frame[0] == f || !st.rt.depth || !st.ubuf[0][2].addr || st.ubuf[0][2].size < 64) return;
-    if (n < 4) return;
-    const float *m = (const float *)(uintptr_t)st.ubuf[0][2].addr;
+    if (mv_frame[0] == f || !gtao_is_lighting(pr)) return;
+    NvnTexEntry *de = gtao_tex_entry(pr->fi, 1);
+    const Range *cam = &st.ubuf[1][2];
+    if (!de || !de->tex->backend || !cam->addr || cam->size < 22 * 16) return;
+    const float *c = (const float *)(uintptr_t)cam->addr;
+    const float *m = c + 12 * 4;  // m0..m3: gtao_before_lighting's own extraction (pc[0..15])
     for (int i = 0; i < 16; i++) if (!isfinite(m[i])) return;
-    if (m[12] == 0 && m[13] == 0 && m[14] == 0) return;  // (perspective: w depends on the position)
+    const float *campos = c + 19 * 4;
+    if (!isfinite(campos[0]) || !isfinite(campos[1]) || !isfinite(campos[2]) || (campos[0] == 0 && campos[1] == 0 && campos[2] == 0)) return;
+    // fsr2_copy inverts whatever lands in mv_vp unconditionally (inv4): refuse a singular (or near-singular) m0..m3
+    // here rather than let it through to produce huge/garbage reprojection values until the next camera cut resets it.
     float a0 = m[0] * m[5] - m[1] * m[4], a1 = m[0] * m[6] - m[2] * m[4], a2 = m[0] * m[7] - m[3] * m[4], a3 = m[1] * m[6] - m[2] * m[5],
           a4 = m[1] * m[7] - m[3] * m[5], a5 = m[2] * m[7] - m[3] * m[6], b0 = m[8] * m[13] - m[9] * m[12], b1 = m[8] * m[14] - m[10] * m[12],
           b2 = m[8] * m[15] - m[11] * m[12], b3 = m[9] * m[14] - m[10] * m[13], b4 = m[9] * m[15] - m[11] * m[13], b5 = m[10] * m[15] - m[11] * m[14];
     if (fabsf(a0 * b5 - a1 * b4 + a2 * b3 + a3 * b2 - a4 * b1 + a5 * b0) < 1e-9f) return;
+    {   // (debug) LARECOMP_MV_LOG=<frame>: logs this capture, again every 300 frames (6 times)
+        static long at = -2;
+        if (at == -2) at = ENV("LARECOMP_MV_LOG") ? atol(ENV("LARECOMP_MV_LOG")) : -1;
+        if (at >= 0 && f >= (uint64_t)at && (f - (uint64_t)at) % 300 == 0 && (f - (uint64_t)at) / 300 < 6)
+            LOG("[mvlog] frame %llu: camera (%.2f, %.2f, %.2f), m0..m3 %.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g\n",
+                (unsigned long long)f, campos[0], campos[1], campos[2], m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+    }
     mv_frame[1] = mv_frame[0], memcpy(mv_vp[1], mv_vp[0], sizeof mv_vp[0]);
     mv_frame[0] = f, memcpy(mv_vp[0], m, sizeof mv_vp[0]);
-    mv_depth = st.rt.depth;
-    if (mv_depth->backend) fsr2_scene_w = ((TexBackend *)mv_depth->backend)->width, fsr2_scene_h = ((TexBackend *)mv_depth->backend)->height;
+    mv_tanfovy = fabsf(c[21 * 4 + 1]);
+    mv_depth = de->tex;
+    TexBackend *db = de->tex->backend;
+    fsr2_scene_w = db->width, fsr2_scene_h = db->height;
 }
 
 // (renderer_stats, once per stats interval) copies made aliases / renamed / partly or fully copied later
@@ -8078,21 +8074,26 @@ static bool fsr2_copy(Prog *pr) {
                                            .pColorBlendState = &cbs, .pDynamicState = &dy, .layout = layout};
         VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pipe));
     }
-    // camera cuts (another view: a scene change, a cutscene's cut) start FSR 2's history again
+    // camera cuts (another view: a scene change, a cutscene's cut) start FSR 2's history again. mv_vp holds the
+    // reconstruction basis m0..m3 (mv_note_draw): m2 (the "depth" column) is how world position moves per unit of
+    // depth, i.e. roughly the view's forward axis - the same role the old code read off a forward matrix's w row.
     bool reset = mv_frame[1] + 1 != f || fsr2_ok_frame + 1 != f;
     {
-        const float *a = mv_vp[0], *b = mv_vp[1];  // (the view axis: w's row of the projection x view)
-        float la = sqrtf(a[3] * a[3] + a[7] * a[7] + a[11] * a[11]), lb = sqrtf(b[3] * b[3] + b[7] * b[7] + b[11] * b[11]);
-        if (la > 0 && lb > 0 && (a[3] * b[3] + a[7] * b[7] + a[11] * b[11]) / (la * lb) < 0.95f) reset = true;
+        const float *a = mv_vp[0] + 8, *b = mv_vp[1] + 8;
+        float la = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]), lb = sqrtf(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
+        if (la > 0 && lb > 0 && (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb) < 0.95f) reset = true;
     }
     static float react[2] = {-1, -1};
     if (react[0] < 0) {
         react[0] = ENV("LARECOMP_FSR2_REACT_CHAR") ? (float)atof(ENV("LARECOMP_FSR2_REACT_CHAR")) : 0.8f;
         react[1] = ENV("LARECOMP_FSR2_REACT_FOLIAGE") ? (float)atof(ENV("LARECOMP_FSR2_REACT_FOLIAGE")) : 0.2f;
     }
+    // fsr2_mv.frag: inv_cur * ndc reconstructs world position (exactly mv_vp[0]'s own m0..m3 formula - no inversion
+    // needed, it's already the inverse view-projection); prev * world reprojects into the other frame's clip space,
+    // which needs that frame's forward matrix - the inverse of what mv_note_draw stored for it.
     float u[40];
-    inv4(mv_vp[0], u);
-    memcpy(u + 16, reset ? mv_vp[0] : mv_vp[1], 64);
+    memcpy(u, mv_vp[0], 64);
+    inv4(reset ? mv_vp[0] : mv_vp[1], u + 16);
     u[32] = fsr2_jx, u[33] = fsr2_jy, u[34] = 1.0f / w, u[35] = 1.0f / h;
     u[36] = react[0], u[37] = react[1], u[38] = u[39] = 0;
     VkCommandBuffer cb = vk_cmd();
@@ -8134,13 +8135,14 @@ static bool fsr2_copy(Prog *pr) {
     uint64_t now = plat_now_ns();
     float dt = last_ns ? (float)((now - last_ns) / 1e6) : 16.7f;
     last_ns = now;
-    const float *m = mv_vp[0];
-    float p11 = sqrtf(m[1] * m[1] + m[5] * m[5] + m[9] * m[9]);  // (the projection's y scale: the y row's length)
+    // near_z: mv_vp no longer carries a forward projection matrix to read a near plane off - FSR 2's own fallback
+    // (a plausible-enough constant; it only tunes depth-based heuristics inside FSR 2, not the reprojection above).
+    // fov_y: exact now, straight from the cbuf (mv_note_draw's mv_tanfovy), not a matrix-row-length guess.
     VkFsr2Frame fr = {.color = sb->image, .depth = zb->image, .mv = mvb->image, .reactive = rb->image, .out = ob->image,
                       .color_view = cv, .depth_view = zv, .mv_view = post_view(mvb), .reactive_view = post_view(rb), .out_view = post_view(ob),
                       .color_format = sb->format, .depth_format = zb->format, .out_format = VK_FORMAT_R8G8B8A8_UNORM,
                       .w = w, .h = h, .ow = w, .oh = h, .jx = fsr2_jx, .jy = fsr2_jy, .dt_ms = fminf(fmaxf(dt, 1), 100),
-                      .near_z = m[14] > 0 ? m[14] : 0.1f, .fov_y = p11 > 0 ? 2 * atanf(1 / p11) : 1.0f, .sharpness = 0, .reset = reset};
+                      .near_z = 0.1f, .fov_y = mv_tanfovy > 0 ? 2 * atanf(mv_tanfovy) : 1.0f, .sharpness = 0, .reset = reset};
     VkCommandBuffer sec = fsr2_cmd();
     bool ok = vk_fsr2_record(g_vk.phys, g_vk.dev, sec, &fr);
     VK_CHECK(vkEndCommandBuffer(sec));
