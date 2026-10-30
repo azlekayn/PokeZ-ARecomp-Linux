@@ -1,5 +1,44 @@
 # ZA Recomp (Linux / Steam Deck): next steps
 
+**IDENTIFIED: the crash is upstream's own open issue #22, not a new bug (2026-10-30 night, start here).** Found a
+previous dev session's full transcript at `opencode/opencode.md` (2.5 MB, not ours - predates this session, kept for
+reference, see its own note below) and it names the exact mechanism. Z-A skins characters with **transform feedback**
+(~140 sessions/frame, `exec.c` ~line 4892 `xm_on`/`xm_lookup`/"transform feedback mirror") - draws read the skinned
+output straight back as **vertex streams** (fixed-function vertex input, not a storage-buffer/SSBO read). A dedicated
+"mirror" exists to make that read safe (copies the XFB output to a device-local buffer first), but it's **off by
+default on AMD GPUs**, and the code comment names the reason verbatim: *"#22: an RX 9070 XT lost the device on an
+invalid GPU read in exactly these skinning draws, with robust access on and submissions made one at a time"* -
+upstream's own team tried hardening it (Vulkan robustness, serialized submissions) and it still crashed. Turning the
+mirror off doesn't fix it either (already confirmed upstream, see §1 below: "still happens with the mirror off, and
+is still being investigated") - with the mirror off, the skinned output just goes straight to the shared guest-heap
+import instead, read back through `guest_direct()`'s plain vertex-buffer bind path, which (confirmed this session) has
+**zero staleness/GPU-write protection** of its own outside of overlap-only machinery.
+
+**What tonight adds that upstream's issue #22 doesn't have:** the exact crashing pipeline, decoded via
+`LARECOMP_DEBUG_PIPELINE_HASH` - a **shadow-caster depth-only pass** (one position-only vertex attribute, 12-byte
+stride, zero color targets, a real depth target - `shader_rec_format`'s `a=22 s=c/0 c=0,0,0,0,0,0,0,0 d=35`), and the
+exact fault shape - `address read invalid 0xffff804002d6f000`, **~250 GB past the nearest tracked buffer** - which
+reads as a shader dereferencing numerically-garbage data, not a tight race on otherwise-valid data. Both of tonight's
+two captures hit this same pipeline, once with `gpu_overlap` off and once on - consistent with this being the
+mirror-independent, overlap-independent bug the code comment already names, not anything new from this fork
+(confirmed separately by two independent branch-vs-upstream reviews, see below).
+
+**Recommendation: don't attempt a speculative fix for this tonight.** Upstream's own team has already tried the
+obvious hardening (robustness extensions, serialized submissions) without success, and it's explicitly still open on
+their end. The next useful step is probably reporting *this* session's specifics (the shadow-caster localization, the
+precise fault-address magnitude) back to upstream issue #22, since it's more precise than what's in the issue now -
+not guessing at a fix locally without their context or a way to validate it beyond "didn't crash this time."
+
+**A note on `opencode/opencode.md`:** this file (and the `opencode/` folder it's in) is from a previous session using
+a different tool (OpenCode, not Claude Code) - found tonight via `opencode session export` after the user recalled
+a prior deep-dive existed. It is **not tracked by git and not created by this session** - leave it alone (don't
+commit it, matches the existing untracked-files rule for `PROMPT.md`/`ZA-NEMESIS-RE.md`/`za_worklog.c`), but it's a
+genuinely valuable reference: it has the `LARECOMP_GPU_OVERLAP=1` and `LARECOMP_FOCUS_REBUILD=1` experiments that
+were very likely the user's two missing Steam launch-option flags (see "fps regression" note below), plus a lot of
+prior Deck perf/crash investigation this file's §1/§1b/§4 sections didn't have.
+
+---
+
 **Our-branch-vs-upstream validation (2026-10-30, two independent reviews - start here for the night's three live
 bugs below).** The user asked whether our fork's own changes (not upstream's pre-existing code) are responsible for
 tonight's instability. Two independent reviews (this session's own code reading + a fresh agent with no shared
