@@ -253,6 +253,88 @@ submission would even address. Two things followed from that:
   4. If practical, a different/older Mesa build on the Deck purely as a driver-vs-app discriminator (SteamOS's Mesa
      is usually not user-swappable without real effort, so this is a last resort, not a quick test).
 
+## 1c. This is upstream's bug too, independently (2026-10-29 night)
+
+Upstream (`Hexveil404/PokeZ-ARecomp`, our fork's base) has the **exact same crash class**, found and reported
+completely independently on different hardware: Windows 11 + AMD RX 9070 XT, `FATAL: r failed: -4 (record.c:578)`,
+`GPU page fault detected`, ~31 s into a session (issue #39, also reproduced on RX 7700 XT and RX 7600 - issue #72).
+This rules out "maybe it's a buggy Mesa git-snapshot driver on this one Deck" for good: it happens on the proprietary
+Windows AMD driver too. One of their crash addresses was literally `0xbeefdeadc000` - a poison/sentinel pattern,
+strong evidence of a genuine use-after-free rather than a driver quirk. Their most reliable trigger: **defeating a
+Bunnelby in the first battle** - worth trying as a much more targeted repro than our loading-screen taps (our test
+save already has a Bunnelby in the party). Their v0.1.12 shipped an "instanced vertex buffer copy size" fix for a
+related but **not confirmed as the root cause** bug (their own A/B test with the old buggy behavior forced back via
+`LARECOMP_VK_OLD_INSTANCE_COPY=1` did not reproduce the crash either way) - issue #39 is still open upstream as of
+v0.1.12. They also shipped a real diagnostic win worth having regardless: `[vk] GPU address binding report: on` names
+the GPU object at a device-fault address directly, no `umr`/RADV_DEBUG=hang needed.
+
+**Rebased our `linux` branch onto v0.1.12** (`git rebase --onto v0.1.12 cff8364 linux`, backup at
+`linux-backup-pre-v0.1.12-rebase`). Two real conflicts in `device.c` (merging our frame-gen compute-queue addition
+with upstream's new address-binding-report feature), both resolved by hand and it builds clean. **Not yet pushed to
+GitHub/GitLab or the Deck** - validated only that Vulkan device creation succeeds locally (RX 7800 XT) with both
+merged features initializing correctly; never got a full gameplay frame locally (the cached `lasgame.so` needs a
+fresh compile under the new `GAMELIB_ID`, which needs the launcher's one-time UI click - `LARECOMP_FORCE_LAUNCHER=1`
+gets the launcher to show despite `LARECOMP_INPUT` being set, but its "Compile now" button needs a real mouse click;
+no `xdotool`/passwordless sudo available to automate it). Next session: either click through that by hand once, or
+find another way to drive the launcher headlessly, before trusting this build further.
+
+**Also found tonight: even the older, previously-"stable" `031cf13` (pre-investigation UI-split) build is unstable in
+real play** - the Deck crashed hard enough once to need a full physical reboot while testing (though that was with
+`ENABLE_VULKAN_RENDERDOC_CAPTURE=1` active, a confound worth noting), and a separate casual-play session on the same
+build was reportedly unusable. Given §1c above, this isn't surprising: the bug isn't tied to any specific commit in
+our own history, so no older build is immune.
+
+## 1d. The v0.1.12 rebase runs clean for 3 minutes on the dev PC (overnight, 2026-10-29/30)
+
+Picked back up on the §1c smoke-test blocker (needed a real mouse click to get through the launcher's one-time
+"Compile now" UI, no `xdotool`/sudo available). Solved it properly instead of fighting the launcher: built the game
+code directly via the documented dev workflow (`tools/gen.py` + `make`), bypassing the launcher UI entirely.
+
+- **Set up `tools/venv`** (didn't exist locally) with `capstone`, `lz4`, `unicorn` - `gen.py`'s actual dependencies.
+- **`make gen`** (pure Python codegen against the repo's own already-present `extracted/exefs`) succeeded in ~100 s,
+  no issues.
+- **`make -j6 gen-objs` and the final link both needed workarounds**, all environmental, none code problems:
+  1. `libavcodec/avcodec.h` not found - ffmpeg-dev is vendored at `build/linux/x86_64/deps` (from the earlier podman
+     `make appimage` runs) but the native build needs `DEPS=` pointed at it explicitly (the podman build's container
+     wires this up internally).
+  2. `-I$(DEPS)/include` / `-L$(DEPS)/lib` broke because **this repo's own path contains a space** ("SSD Storage") -
+     the Makefile doesn't quote `$(DEPS)` in its flag construction, so make/the shell word-split it. Fixed by
+     symlinking the deps dir to a space-free path (`/tmp/za-deps`) and pointing `DEPS` there instead - not a bug in
+     the project's code, just a local-path quirk; the podman build never hits it because the container mounts at
+     `/src`.
+  3. `-fuse-ld=lld`: `lld` isn't installed on this host at all (only in the podman image). Manually re-ran the two
+     link commands (`build/lasrecomp` and `build/lasgame.so`) with that flag stripped, using the system default
+     linker (`ld.bfd`) instead - fine for a local test binary, not something to fix upstream.
+  4. `-lshaderc`: the vendored lib is named `libshaderc_shared.so`, not `libshaderc.so` - symlinked it to match.
+  - None of these are real build-system bugs worth fixing in the Makefile; they're all "native host build without
+    the full dep set the podman image provides" issues. Worth remembering for next time rather than re-discovering.
+- **Result: a genuine native `build/lasrecomp` + `build/lasgame.so`** for this exact v0.1.12-rebased tree, GAMELIB_ID
+  `44da472c7706254e-B1F12FD919EAE86A`. Copied into `~/.local/share/lasrecomp/extracted/` (overwriting the old
+  pre-rebase `lasgame.so` there - fully reproducible from source + the same game files, so no real loss) and ran it
+  directly (`LD_LIBRARY_PATH=/tmp/za-deps/lib`, the usual `LARECOMP_VK_HEAP_DMABUF=0`/`GMEM_WINDOW=256`,
+  `LARECOMP_HIDDEN=1`, scripted `LARECOMP_INPUT` taps then idle).
+  - **Ran clean at a steady 60.0 fps for just over 3 minutes (frame 10290, t=179.9 s) with zero crash**, on this
+    machine's RX 7800 XT - well past the ~20-75 s window where **every single Deck test tonight crashed**. Memory
+    stayed flat and healthy the whole time (no leak).
+  - **Caveat, don't over-read this result:** the scripted input only walked for a few seconds; the rest of those 3
+    minutes was the character standing idle, not exploring new content or hitting loading transitions. Since every
+    Deck crash tonight was tied to *content* (the loading-screen -> world transition, specific UI panels, or
+    GPU-indirect foliage draws), an idle scene not reproducing the hang doesn't mean this build is fixed - it may
+    just mean this particular run never exercised the trigger. `LARECOMP_HIDDEN=1` (no real window/compositor) is
+    also a different presentation path than the Deck's windowed, gamescope-composited one, which could itself matter
+    for a timing-sensitive bug.
+  - Still a genuinely useful data point: the rebase is demonstrably playable and stable-enough-to-navigate-menus on
+    real hardware, not just "compiles."
+- **Next session:** rerun this same local setup with a LONGER, content-varied `LARECOMP_INPUT` script (actual
+  walking into new areas, ideally toward a battle - §1c's "defeat a Bunnelby" recipe) rather than mostly-idle time,
+  to get a real apples-to-apples test against the Deck's failure mode. If it's *still* clean after exploring real
+  content for several minutes, that would be a much stronger signal (either this GPU/driver genuinely doesn't hit it,
+  or the v0.1.12 rebase's bundled fixes help more than upstream's own inconclusive A/B test suggested).
+- **Cleanup done:** killed the test process cleanly (`SIGTERM`, exited fine, no stuck-shutdown repeat this time),
+  killed two leftover `python3 -m http.server` processes from earlier pushes that were missed, memory fully back to
+  normal (17 GB available). The v0.1.12 rebase itself is still **local-only** - not pushed to GitHub/GitLab or the
+  Deck.
+
 ## 2. Recurring GPU page fault at GPU VA 0x80010c800000
 
 - **Symptoms:** a CB/DB (colour/depth) write gets a permission fault, then the ring times out and a MODE2 reset
