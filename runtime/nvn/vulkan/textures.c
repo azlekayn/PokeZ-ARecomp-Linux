@@ -200,8 +200,15 @@ void renderer_set_alloc_scale(float ax, float ay) { g_al_x = ax; g_al_y = ay; }
 // rows: exec.c rscale), and the passes into the window textures bind nothing else (one colour target, no depth:
 // LARECOMP_VK_LOG_PRESENT_PASSES on the Deck). 0: as the rest (device.c sets it each frame; LARECOMP_UI_NATIVE=0).
 // Not with Dynamic resolution's steps: the UI's allocation is its scale.
+// Sticky against a momentary 0 (device.c's own degenerate-case guard, uy < sy*1.01 || uy > 4): a panel that's drawn
+// once on a state change (the Box menu's move list / item list, not every frame) and happens to be created on
+// exactly the frame that guard fires gets built at the scene's scale; the very next frame's real UI scale then
+// looks like "the output resolution changed" to tex_backend below, which destroys and recreates it - wiping the
+// one-shot draw with nothing to redraw it until the player changes the selection again (found 2026-10-30, Box
+// menu text invisible until re-selected). A real resolution change is rare and holds for many frames in a row, so
+// never forgetting the last real (non-zero) value this way costs nothing in the normal case and only helps here.
 static float g_ui_x, g_ui_y;
-void renderer_set_ui_scale(float ux, float uy) { g_ui_x = ux; g_ui_y = uy; }
+void renderer_set_ui_scale(float ux, float uy) { if (uy > 0) g_ui_x = ux, g_ui_y = uy; }
 static bool tex_ui(const TexBackend *b) { return b->ui && g_ui_x > 0; }
 // The part of a scalable texture its contents occupy (Dynamic: the render scale over the allocation scale; 1 otherwise).
 void renderer_texture_fraction(NvnTexture *t, float *fx, float *fy) {
