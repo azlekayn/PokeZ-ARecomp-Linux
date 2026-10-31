@@ -152,7 +152,7 @@ Vulkan Memory Allocator from your distribution, Python 3.12. Packages, cross bui
 1. Build: `make -j` -> `build/lasrecomp`. Set up your game files (above), then `make gen` and `make -j` again.
 2. Run: `./build/lasrecomp extracted`.
 3. Package: `make appimage` (this machine's arch; `ARCH=aarch64` cross-compiles) or `make appimages` (both) ->
-   `build/dist/LAS Recomp-<version>-linux-<arch>.AppImage`, built in Ubuntu 22.04 containers (podman). `make smoketest`
+   `build/dist/ZA Recomp-<version>-b<build>-linux-<arch>.AppImage`, built in Ubuntu 22.04 containers (podman). `make smoketest`
    checks the x86-64 AppImage before a release.
 
 Where files live (game files, saves, seeds, settings, caches, imported fonts):

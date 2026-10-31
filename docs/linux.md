@@ -69,7 +69,7 @@ The randomizer from a source checkout uses LAS-Randomizer's own venv (Python 3.1
 Needs podman, and for the other arch's AppImage QEMU user emulation with binfmt (`sudo apt install podman qemu-user
 qemu-user-binfmt`).
 
-    make appimage                # this machine's arch -> build/dist/LAS Recomp-<version>-linux-<arch>.AppImage
+    make appimage                # this machine's arch -> build/dist/ZA Recomp-<version>-b<build>-linux-<arch>.AppImage
     make appimage ARCH=aarch64   # on x86-64: cross-compiled
     make appimages               # both
 

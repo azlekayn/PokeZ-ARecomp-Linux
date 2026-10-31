@@ -2,8 +2,9 @@
 # tools/linux/package.sh <x86_64|aarch64> (inside a build container, tools/linux/appimage.sh: the AppImage's own arch
 # when the host has it, else amd64 cross-compiling): the game built
 # against build/linux/<arch>/deps and the seed generator helper (tools/linux/rando_helper.sh) put together
-# as an AppDir and packed by appimagetool: build/dist/LAS Recomp-<version>-linux-<arch>.AppImage
-# (named like the macOS / Windows releases; GitHub shows it as LAS.Recomp-<version>-linux-<arch>.AppImage).
+# as an AppDir and packed by appimagetool: build/dist/ZA Recomp-<version>-b<build>-linux-<arch>.AppImage
+# (<build>: this commit's count on the branch - git log, so it only grows; the Windows / macOS builds still use
+# LAS Recomp's own naming, untouched here - this file is Linux-only).
 # Shipped next to the executable (usr/bin, where runtime/paths.c rt_resource looks): rando-gen/, what the start screen
 # builds the game code with on the player's machine (runtime/gamebuild.c: lasgen/, zig/ from tools/fetch_zig.sh,
 # gamelib-src/), the window icon, the start screen font. No game code: that's built from the player's own files. usr/lib: the libraries from deps/ only - glibc, libstdc++, the Vulkan loader and the
@@ -16,7 +17,8 @@ P=$L/deps
 B=$L/game
 APPDIR=$L/AppDir
 VERSION=$(sed -n 's/^#define LARECOMP_VERSION "\(.*\)"/\1/p' runtime/ui/launcher.mm)
-OUT="build/dist/LAS Recomp-$VERSION-linux-$ARCH.AppImage"
+BUILD=$(git rev-list --count HEAD 2>/dev/null || echo "?")
+OUT="build/dist/ZA Recomp-$VERSION-b$BUILD-linux-$ARCH.AppImage"
 JOBS=$(nproc)
 
 tools/linux/build_deps.sh "$ARCH"
