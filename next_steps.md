@@ -1,5 +1,23 @@
 # ZA Recomp (Linux / Steam Deck): next steps
 
+**UPDATE, same night: build #20 (pre-v0.1.12-rebase) runs `gpu_overlap=on` clean - revises the issue #22 theory
+below.** Built a `za-build20-targeted` branch (2ec3d52 = build #20 + `665a201` fps-decay fix + `2fcafbf` UI
+separation + a hand-isolated frame-gen motion-vector fix + `19723e9` input combo fix - deliberately *without*
+today's `hc_lookup`/`vtx_must_copy` overlap fix) to test whether the night's instability predates this fork's own
+changes. Tested live on the Deck with `LARECOMP_GPU_OVERLAP=1` forced on (this build has no F1/ini `gpu_overlap`
+setting at all yet - `grep` confirms no `GPU_OVERLAP`/`gpu_compat` in `settings.c`, so the Compatibility page must
+have landed after build #20; forced via the env var in `run.sh` instead): **no vertex explosions, no flickering
+textures, stable with the overlap fps boost.** That's a real data point against "this is upstream's permanently
+pre-existing issue #22, unrelated to anything in our history" - build #20 predates not just today's three fixes but
+the *entire* v0.1.12 rebase, so if the shadow-caster/transform-feedback bug doesn't reproduce here, it more likely
+got introduced by the v0.1.12 rebase itself (upstream's own newer code) or something later, not something eternally
+baked into the shared LAS Recomp lineage. **Not conclusive yet** - this bug was always content/timing-triggered, so
+one clean session doesn't prove it's absent; needs more play time in the same busy areas that crashed on the full
+branch before trusting this. If it holds up, the next real step is diffing upstream's own shadow-caster/skinning
+code between whatever v0.1.10 was based on and `v0.1.12` specifically, not assuming it's unfixable.
+Branch pushed to both remotes (`za-build20-targeted`), and all of tonight's prior `linux` work is separately
+preserved at `linux-pre-build20-rebase` in case this branch ends up replacing `linux` as mainline later.
+
 **IDENTIFIED: the crash is upstream's own open issue #22, not a new bug (2026-10-30 night, start here).** Found a
 previous dev session's full transcript at `opencode/opencode.md` (2.5 MB, not ours - predates this session, kept for
 reference, see its own note below) and it names the exact mechanism. Z-A skins characters with **transform feedback**
