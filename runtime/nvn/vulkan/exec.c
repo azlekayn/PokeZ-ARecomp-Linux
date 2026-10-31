@@ -8085,12 +8085,17 @@ static bool fsr2_copy(Prog *pr) {
     // camera cuts (another view: a scene change, a cutscene's cut) start FSR 2's history again. mv_vp holds the
     // reconstruction basis m0..m3 (mv_note_draw): m2 (the "depth" column) is how world position moves per unit of
     // depth, i.e. roughly the view's forward axis - the same role the old code read off a forward matrix's w row.
-    bool reset = mv_frame[1] + 1 != f || fsr2_ok_frame + 1 != f;
+    // cut: no usable previous camera (the motion vectors then are 0); reset: FSR 2's history too, which also needs
+    // FSR 2 to have run last frame. The vectors take only `cut`: with FSR 2 off (frame generation alone),
+    // fsr2_ok_frame never moves, and `reset` was true every frame - the vectors were always 0 and every generated
+    // frame a copy of the game's (2026-10-30, Steam Deck: byte-identical LARECOMP_FG_DUMP images while panning).
+    bool cut = mv_frame[1] + 1 != f;
     {
         const float *a = mv_vp[0] + 8, *b = mv_vp[1] + 8;
         float la = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]), lb = sqrtf(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
-        if (la > 0 && lb > 0 && (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb) < 0.95f) reset = true;
+        if (la > 0 && lb > 0 && (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb) < 0.95f) cut = true;
     }
+    bool reset = cut || fsr2_ok_frame + 1 != f;
     static float react[2] = {-1, -1};
     if (react[0] < 0) {
         react[0] = ENV("LARECOMP_FSR2_REACT_CHAR") ? (float)atof(ENV("LARECOMP_FSR2_REACT_CHAR")) : 0.8f;
@@ -8101,7 +8106,7 @@ static bool fsr2_copy(Prog *pr) {
     // which needs that frame's forward matrix - the inverse of what mv_note_draw stored for it.
     float u[40];
     memcpy(u, mv_vp[0], 64);
-    inv4(reset ? mv_vp[0] : mv_vp[1], u + 16);
+    inv4(cut ? mv_vp[0] : mv_vp[1], u + 16);
     u[32] = fsr2_jx, u[33] = fsr2_jy, u[34] = 1.0f / w, u[35] = 1.0f / h;
     u[36] = react[0], u[37] = react[1], u[38] = u[39] = 0;
     VkCommandBuffer cb = vk_cmd();
