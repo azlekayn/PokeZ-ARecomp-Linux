@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ZA Recomp
+Comment=Pokemon Legends: Z-A, recompiled (bring your own game files)
+Exec=pokeza-recomp
+Icon=pokeza-recomp
+Categories=Game;
+Terminal=false
