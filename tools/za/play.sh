@@ -1,7 +1,7 @@
 #!/bin/bash
 # Pokémon Z-A com o teclado: setas = d-pad, Enter = A, Backspace = B, P = Plus, M = Minus (WASD = analógico, K/J/L/I = A/B/X/Y)
 # log em za-tools/play.log, screenshot a cada 120 quadros em LASRecomp/build/frame_*.png
-# roda sob o gdb (hang.gdb): num travamento, `kill -INT $(pgrep -x pokemon-za || pgrep -x lasrecomp)` põe os stacks de todas as threads no log
+# roda sob o gdb (hang.gdb): num travamento, `kill -INT $(pgrep -x pokeza-recomp || pgrep -x lasrecomp)` põe os stacks de todas as threads no log
 S=$HOME/recomp/za-tools
 cd $HOME/recomp/LASRecomp
 rm -f build/frame_*.png
