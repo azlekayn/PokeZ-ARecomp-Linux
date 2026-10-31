@@ -1655,44 +1655,6 @@ static void begin_pass(void) {
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = pass_layers,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = pass_ncolor ? ca : NULL,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
-    {   // (debug) LARECOMP_VK_LOG_PRESENT_PASSES=1: each distinct kind of pass that draws into a presented image (its
-        // attachments, their scales, depth / stencil bound) once - can it take its own scale (the HUD at the window's
-        // resolution) without sharing a pass with a target at another scale?
-        extern uint64_t renderer_exec_frame(void);
-        static int on = -1;
-        if (on < 0) on = getenv("LARECOMP_VK_LOG_PRESENT_PASSES") != NULL;
-        bool pres = false;
-        for (uint32_t i = 0; i < pass_ncolor && on && !placed; i++)
-            pres |= st.rt.color[i] && st.rt.color[i]->backend && ((TexBackend *)st.rt.color[i]->backend)->presented;
-        if (pres) {
-            static uint64_t seen[64];
-            static int nseen;
-            uint64_t sig = (uint64_t)pass_ncolor * 1000003u + (has_d ? 7 : 0) + (has_s ? 13 : 0);
-            for (uint32_t i = 0; i < pass_ncolor; i++) {
-                TexBackend *b = st.rt.color[i] ? st.rt.color[i]->backend : NULL;
-                sig = sig * 31 + (b ? (uint64_t)b->width * 65537 + b->height + (uint64_t)b->presented * 977 + (uint64_t)b->scalable * 131 : 1);
-            }
-            if (st.rt.depth && st.rt.depth->backend) sig = sig * 31 + ((TexBackend *)st.rt.depth->backend)->width;
-            bool known = false;
-            for (int i = 0; i < nseen; i++) known |= seen[i] == sig;
-            if (!known && nseen < 64) {
-                seen[nseen++] = sig;
-                char line[600];
-                int n = snprintf(line, sizeof line, "[vk] present pass %ux%u, frame %llu:", minw, minh,
-                                 (unsigned long long)renderer_exec_frame());
-                for (uint32_t i = 0; i < pass_ncolor && n < (int)sizeof line - 80; i++) {
-                    TexBackend *b = st.rt.color[i] ? st.rt.color[i]->backend : NULL;
-                    if (b) n += snprintf(line + n, sizeof line - (size_t)n, " c%u %ux%u fmt %d s %.3f%s%s", i, b->width, b->height,
-                                         b->format, b->sx, b->presented ? " PRESENTED" : "", b->scalable ? " scalable" : "");
-                }
-                TexBackend *d = st.rt.depth ? st.rt.depth->backend : NULL;
-                if ((has_d || has_s) && d) snprintf(line + n, sizeof line - (size_t)n, " | depth %ux%u s %.3f%s", d->width, d->height, d->sx,
-                                                    d->scalable ? " scalable" : "");
-                else snprintf(line + n, sizeof line - (size_t)n, " | no depth");
-                LOG("%s\n", line);
-            }
-        }
-    }
     // LARECOMP_VK_LOG_PASSES=<n> (default 300 with =1): each of the first n passes before it begins - an Intel crash
     // inside vkCmdBeginRendering (issues #8, #46) ends the log on the pass the driver choked on
     static long log_passes = -1;
@@ -5490,24 +5452,6 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             renderer_texture_scale(e->tex, &sc[0], &sc[1]);
             renderer_texture_fraction(e->tex, &fr[0], &fr[1]);
             wh[0] = e->tex->width; wh[1] = e->tex->height;
-            {   // (debug) LARECOMP_VK_LOG_UI_SOURCES=1: each GPU-drawn image a draw into the shown image samples (its
-                // layers: the scene, a menu or flyout drawn off screen first), once - at which scale it was drawn
-                static int on = -1;
-                if (on < 0) on = ENV("LARECOMP_VK_LOG_UI_SOURCES") != NULL;
-                TexBackend *tb = (TexBackend *)e->tex->backend, *rb = st.rt.color[0] ? (TexBackend *)st.rt.color[0]->backend : NULL;
-                if (on && tb && tb->gpu_owned && rb && (rb->ui || rb->presented) && tb != rb) {
-                    static const void *seen[96];
-                    static int nseen;
-                    bool known = false;
-                    for (int k = 0; k < nseen; k++) known |= seen[k] == e->tex;
-                    if (!known && nseen < 96) {
-                        seen[nseen++] = e->tex;
-                        LOG("[vk] UI source: %ux%u fmt %#x target %u, image %ux%u, scale %.3f%s, shader %016llx (into the shown %ux%u)\n",
-                            e->tex->width, e->tex->height, e->tex->format, e->tex->target, tb->width, tb->height, tb->sx,
-                            tb->scalable ? " scalable" : " NOT SCALED", (unsigned long long)g_cur_fs_hash, rb->width, rb->height);
-                    }
-                }
-            }
             {   // A shadow map drawn bigger (textures.c tex_shadow_scale) still reports the game's size to the shaders'
                 // size queries, and Pokemon Z-A spreads its 16 filter taps by (1 / that size) x a radius: the same
                 // blur in the map's coordinates at any size. F1 > Shadow sharpness (shadow_sharpness in the ini;

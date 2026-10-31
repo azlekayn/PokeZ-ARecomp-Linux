@@ -33,7 +33,6 @@ typedef struct NvnTexture {
     uint64_t debug_id;
     uint32_t pool_refs;  // texture pool entries that name it (cleared when it is finalized: runtime/nvn/objects.c)
     bool format_views;   // named through a view in a format the backend can only give with a flag (Metal: PixelFormatView)
-    bool window;         // one of the game's window textures (nvnWindowInitialize): what it presents, HUD drawn in
     char label[64];
 } NvnTexture;
 

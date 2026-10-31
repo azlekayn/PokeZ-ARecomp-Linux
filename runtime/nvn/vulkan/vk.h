@@ -218,7 +218,6 @@ typedef struct TexBackend {
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
     uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
     bool scalable, presented;
-    bool ui;  // a window texture with its own scale, the UI scale (textures.c g_ui_x: the HUD at the window's resolution)
     uint64_t touched_frame, frame_cleared;
     uint32_t level_gen;
     float sx, sy;        // the scale the contents were drawn at (scalable textures)
