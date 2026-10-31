@@ -3109,6 +3109,9 @@ static TexBackend *hdr_snap_of(TexBackend *shown) {
 static NvnTexture *mv_depth;  // (mv_note_draw below)
 static uint64_t mv_frame[2];
 static float mv_vp[2][16];
+// the scene's viewport in the depth image's pixels (x, y, w, h; mv_note_draw: the lighting draw's). Handheld Z-A draws
+// 1280x720 into 1920x1080 targets: the camera's NDC spans that, not the image (w 0: the whole image)
+static float mv_view[4];
 // ---- temporal anti-aliasing, AMD FSR 2 (fsr2_copy below): this frame's jitter, in the scene's pixels, while FSR 2
 // resolved the frame before (a frame it doesn't resolve is never shown jittered: at most the first one)
 static float fsr2_jx, fsr2_jy;
@@ -3201,6 +3204,10 @@ static void mv_note_draw(Prog *pr) {
     mv_depth = de->tex;
     TexBackend *db = de->tex->backend;
     fsr2_scene_w = db->width, fsr2_scene_h = db->height;
+    float kx = de->tex->width ? (float)db->width / (float)de->tex->width : 1, ky = de->tex->height ? (float)db->height / (float)de->tex->height : 1;
+    const float *v = st.viewport[0];
+    if (v[2] > 0 && fabsf(v[3]) > 0) mv_view[0] = v[0] * kx, mv_view[1] = v[1] * ky, mv_view[2] = v[2] * kx, mv_view[3] = fabsf(v[3]) * ky;
+    else mv_view[2] = mv_view[3] = 0;
 }
 
 // (renderer_stats, once per stats interval) copies made aliases / renamed / partly or fully copied later
@@ -8107,7 +8114,16 @@ static bool fsr2_copy(Prog *pr) {
     float u[40];
     memcpy(u, mv_vp[0], 64);
     inv4(cut ? mv_vp[0] : mv_vp[1], u + 16);
-    u[32] = fsr2_jx, u[33] = fsr2_jy, u[34] = 1.0f / w, u[35] = 1.0f / h;
+    // (fsr2_mv.frag's uv = (gl_FragCoord - jit.xy) * jit.zw: over the scene's viewport, mv_view - with the whole image
+    // instead, handheld's 1280x720 in 1920x1080 reprojected every pixel to the wrong place: frame generation ghosted)
+    bool vw_ok = mv_view[2] >= 1 && mv_view[3] >= 1 && mv_view[0] + mv_view[2] <= w + 0.5f && mv_view[1] + mv_view[3] <= h + 0.5f;
+    u[32] = fsr2_jx + (vw_ok ? mv_view[0] : 0), u[33] = fsr2_jy + (vw_ok ? mv_view[1] : 0);
+    u[34] = 1.0f / (vw_ok ? mv_view[2] : (float)w), u[35] = 1.0f / (vw_ok ? mv_view[3] : (float)h);
+    {
+        static int nlog;
+        if (nlog++ < 2) LOG("[fg] motion vectors over the viewport %.0f,%.0f %.0fx%.0f of a %ux%u image%s\n", mv_view[0], mv_view[1],
+                            mv_view[2], mv_view[3], w, h, vw_ok ? "" : " (not usable: the whole image)");
+    }
     u[36] = react[0], u[37] = react[1], u[38] = u[39] = 0;
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
