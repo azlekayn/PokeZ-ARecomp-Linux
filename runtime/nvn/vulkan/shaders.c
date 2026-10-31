@@ -355,31 +355,49 @@ static const char *builtin_src(const char *name, int *stage) {
     }
     // Frame generation (LARECOMP_FRAMEGEN; exec.c vk_fg_build): half a frame after the current one, from its colour
     // and the scene's motion vectors (fsr2_mv.frag above). A pixel at p now was at p + mv a frame ago, so half a frame
-    // on it is at p - mv/2: the generated frame samples the current one at q + mv/2 (extrapolated - par.z 0). It is
+    // on it is at p - mv/2: the generated frame samples the current one at the p with p - mv(p)/2 = q (extrapolated - par.z 0). It is
     // shown after the game's frame (device.c fgq), so the frame between the last two (par.z 1, LARECOMP_FG_MODE=interp)
     // went half a step back each time: N, N-1/2, N+1, N+1/2 - on a Steam Deck it still looked 30 fps once the two were
-    // spaced on screen. Where the motion vectors are ~0 (the HUD, menus, a cut) the current frame is shown as it is.
+    // spaced on screen. Where the motion vectors are ~0 (menus, a cut) the current frame is shown as it is.
+    // The HUD: its motion vectors are the scene's behind it (they come from depth), so it was moved with the scene -
+    // a doubled minimap and labels every other frame (2026-10-31, Steam Deck dump: "683" -> "6883"). base is the
+    // window image before the HUD was drawn over it (exec.c hdr_snapshot; cur itself when there is none): where cur
+    // differs from it is HUD, shown as it is, and the scene is moved from base, so no HUD pixel is dragged into it.
     if (!strcmp(name, "fg_interp.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
                "layout(set = 0, binding = 0) uniform sampler2D prev;\n"
                "layout(set = 0, binding = 1) uniform sampler2D cur;\n"
                "layout(set = 0, binding = 2) uniform sampler2D mv;\n"
-               "layout(push_constant) uniform P { vec4 sz; vec4 par; } pc;\n"  // (1/w, 1/h, w, h), (threshold px, strength, -, -)
+               "layout(set = 0, binding = 3) uniform sampler2D base;\n"
+               // (1/w, 1/h, w, h), (threshold px, strength, mode, dump), the scene's part of the image in uv (x0, y0, x1, y1)
+               "layout(push_constant) uniform P { vec4 sz; vec4 par; vec4 vw; } pc;\n"
                "layout(location = 0) out vec4 o;\n"
+               "vec2 mvat(vec2 q) { return texelFetch(mv, clamp(ivec2(q * pc.sz.zw), ivec2(0), ivec2(pc.sz.zw) - 1), 0).xy; }\n"
                "void main() {\n"
                "  vec2 uv = gl_FragCoord.xy * pc.sz.xy;\n"
                "  vec3 curc = texture(cur, uv).rgb;\n"
-               "  vec2 mvp = texture(mv, uv).xy;\n"  // motion in pixels (current -> previous)
-               // Interpolate only where the picture actually moves: under the threshold (a still camera, the HUD, a menu)
-               // the exact current frame is shown - sharp, and the UI can't flicker. par.y scales the effect down.
-               "  float t = pc.par.x > 0.0 ? clamp(length(mvp) / pc.par.x, 0.0, 1.0) * pc.par.y : pc.par.y;\n"
-               "  vec2 m = mvp * pc.sz.xy;\n"
-               "  vec3 mid = pc.par.z > 0.5 ? mix(texture(cur, uv - 0.5 * m).rgb, texture(prev, uv + 0.5 * m).rgb, 0.5)\n"
-               "                            : texture(cur, uv + 0.5 * m).rgb;\n"
+               "  vec3 d = abs(curc - texture(base, uv).rgb);\n"
+               "  bool hud = max(d.r, max(d.g, d.b)) > 3.0 / 255.0;\n"
+               "  vec2 lo = pc.vw.xy + 0.5 * pc.sz.xy, hi = pc.vw.zw - 0.5 * pc.sz.xy;\n"
+               "  bool scene = all(greaterThanEqual(uv, pc.vw.xy)) && all(lessThan(uv, pc.vw.zw));\n"
+               // Where the pixel shown here half a frame on is now: at p with p - mv(p)/2 = uv, found by a few fixed-point
+               // steps from uv. mv(uv) alone is the motion of whatever is here now - beside a character near the camera's
+               // pivot (still) over a panning background (moving), the background's: the character was sampled twice
+               // (a doubled head, Steam Deck dump 2026-10-31). Nearest texels (texelFetch): a blend of two motions across
+               // an edge is neither's. Inside the scene's area only (handheld: 1280x720 of 1920x1080 - black came in).
+               "  vec2 p = uv;\n"
+               "  for (int i = 0; i < 3; i++) p = clamp(uv + 0.5 * mvat(p) * pc.sz.xy, lo, hi);\n"
+               "  vec2 mvp = mvat(p);\n"  // motion in pixels (current -> previous)
+               // Interpolate only where the picture actually moves: under the threshold (a still camera, a menu) and on the
+               // HUD (the mask above) the exact current frame is shown - sharp, and the UI can't flicker. par.y scales it down.
+               "  float t = hud || !scene ? 0.0 : pc.par.x > 0.0 ? clamp(length(mvp) / pc.par.x, 0.0, 1.0) * pc.par.y : pc.par.y;\n"
+               "  vec2 m = mvat(uv) * pc.sz.xy;\n"
+               "  vec3 mid = pc.par.z > 0.5 ? mix(texture(base, uv - 0.5 * m).rgb, texture(prev, uv + 0.5 * m).rgb, 0.5)\n"
+               "                            : texture(base, p).rgb;\n"
                "  o = vec4(mix(curc, mid, t), 1.0);\n"
                // (par.w 1: LARECOMP_FG_DUMP's picture of the motion: x, y in red, green - grey 0.5 = none, +-32 px the
-               // range - and blue where it is over the threshold, i.e. where the generated frame differs)
+               // range - and blue where it is over the threshold, i.e. where the generated frame differs; HUD: none)
                "  if (pc.par.w > 0.5) o = vec4(clamp(mvp / 64.0 + 0.5, 0.0, 1.0), t > 0.0 ? 1.0 : 0.0, 1.0);\n"
                "}\n";
     }

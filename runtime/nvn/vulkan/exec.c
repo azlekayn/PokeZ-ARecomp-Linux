@@ -3097,8 +3097,14 @@ void vk_alias_texture_destroyed(NvnTexture *t) {
 // copies that opaque - edge anti-aliased on the way, so not the same pixels - into the image it presents, and draws the
 // HUD over it with blending. After an opaque draw into an image that has been presented, that image is copied
 // (hdr_snapshot, two: the game alternates two such images): what differs from the copy when it is shown is the HUD.
-static struct { NvnTexture *shown; TexBackend img; } hdr_snaps[2];
+// Frame generation's HUD mask (vk_fg_build, without HDR) uses the same copies, taken once a frame before the first
+// blended draw into that image instead (draw(), LARECOMP_FG_HUD=0 off).
+static struct { NvnTexture *shown; TexBackend img; uint64_t fg_seq; } hdr_snaps[2];  // (fg_seq: vk_fg_build's frame it was taken in)
 static TexBackend *hdr_game;  // (vk_present_draw: this frame's game image, its place in the window, uv crop and flip)
+static bool fg_snapped;  // (hdr_snapshot without HDR - frame generation's HUD mask: this frame's copy is taken)
+static bool fg_scene_in;  // (this frame has drawn opaque into the image it shows: the scene, before the HUD)
+static bool fg_live;  // (vk_fg_build generated a frame last present: the HUD mask's copy is wanted - one frame behind)
+static uint64_t fg_seq;  // (vk_fg_build's count: a copy is this frame's when its fg_seq is the current one)
 static float hdr_place[9];
 static void hdr_snapshot(NvnTexture *t);
 static TexBackend *hdr_snap_of(TexBackend *shown) {
@@ -6518,10 +6524,27 @@ static void draw(CmdRec *r, bool indexed) {
                 (unsigned long long)xfb_size[0], (unsigned long long)xfb_addr[1], (unsigned long long)xfb_size[1],
                 (unsigned long long)xfb_addr[2], (unsigned long long)xfb_size[2]);
     }
+    extern bool vk_fg_on(void);
+    // (frame generation's HUD mask, vk_fg_build: the image it shows as it is before the frame's first blended draw into
+    // it - the HUD's first. Not after its first opaque one: Z-A's scene reaches that image in more than one opaque
+    // draw, and a copy of the first left 95% of the picture "HUD" - never moved - on a Steam Deck dump, 2026-10-31.
+    // Once a frame (fg_snapped), and only after an opaque draw into it this frame (fg_scene_in): some frames draw
+    // blended into it before the scene goes in, and a copy then held the image's old picture - all of it "HUD", nothing
+    // moved: frame generation flickered on and off. LARECOMP_FG_HUD=0: no mask, the HUD moved with the scene as before)
+    static int fg_hud = -1;
+    if (fg_hud < 0) fg_hud = !ENV("LARECOMP_FG_HUD") || atoi(ENV("LARECOMP_FG_HUD"));
+    // (fg_live, not vk_fg_on: frame generation on but idle - unfocused, Dynamic resolution, a resolution other than 1x -
+    // would pay a full-image copy and a pass break a frame for nothing)
+    if (fg_hud && fg_live && !g_vk.hdr && !fg_snapped && st.rt.color[0] && st.rt.color[0]->backend &&
+        ((TexBackend *)st.rt.color[0]->backend)->presented) {
+        if (!(st.color_state[0] & 1)) fg_scene_in = true;
+        else if (fg_scene_in) hdr_snapshot(st.rt.color[0]);
+    }
     draw_(r, indexed);
+    // (the game's picture in the image it shows, before the HUD over it: HDR's paper white for the HUD)
     if (g_vk.hdr && st.rt.color[0] && !st.color_state[0] && st.rt.color[0]->backend &&
         ((TexBackend *)st.rt.color[0]->backend)->presented)
-        hdr_snapshot(st.rt.color[0]);  // (the game's picture in the image it shows, before the HUD over it)
+        hdr_snapshot(st.rt.color[0]);
     PROF_ADD(prof_draw);
 }
 static uint64_t prof_tp_;
@@ -8116,7 +8139,8 @@ static bool fsr2_copy(Prog *pr) {
     inv4(cut ? mv_vp[0] : mv_vp[1], u + 16);
     // (fsr2_mv.frag's uv = (gl_FragCoord - jit.xy) * jit.zw: over the scene's viewport, mv_view - with the whole image
     // instead, handheld's 1280x720 in 1920x1080 reprojected every pixel to the wrong place: frame generation ghosted)
-    bool vw_ok = mv_view[2] >= 1 && mv_view[3] >= 1 && mv_view[0] + mv_view[2] <= w + 0.5f && mv_view[1] + mv_view[3] <= h + 0.5f;
+    bool vw_ok = mv_view[0] >= 0 && mv_view[1] >= 0 && mv_view[2] >= 1 && mv_view[3] >= 1 && mv_view[0] + mv_view[2] <= w + 0.5f &&
+                 mv_view[1] + mv_view[3] <= h + 0.5f;
     u[32] = fsr2_jx + (vw_ok ? mv_view[0] : 0), u[33] = fsr2_jy + (vw_ok ? mv_view[1] : 0);
     u[34] = 1.0f / (vw_ok ? mv_view[2] : (float)w), u[35] = 1.0f / (vw_ok ? mv_view[3] : (float)h);
     {
@@ -8743,8 +8767,8 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     rec_CmdSetViewport(cb, 0, 1, &full);
 }
 
-// ---- frame generation: the frame between the last two shown images (fg_interp.frag), from their colour and the
-// scene's motion vectors (vk_fg_mv). device.c calls this before the present and, when vk_fg_image is set, presents it
+// ---- frame generation: half a frame after the current one (fg_interp.frag; LARECOMP_FG_MODE=interp: between the last
+// two shown), from its colour and the scene's motion vectors (vk_fg_mv). device.c calls this before the present and, when vk_fg_image is set, presents it
 // as the frame after the game's own (backend_present_now). F1 > Video > Rendering "Frame generation" (settings.c;
 // LARECOMP_FRAMEGEN is its load-time override).
 static bool fg_image(TexBackend *d, uint32_t w, uint32_t h) {
@@ -8787,6 +8811,8 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
     static TexBackend prev, interp;
     static uint64_t prev_frame;
     vk_fg_image = NULL;
+    uint64_t seq = fg_seq++;  // (this frame's copy has fg_seq == seq: hdr_snapshot took it before this present)
+    fg_snapped = fg_scene_in = fg_live = false;  // (once a present: the next frame's picture before its HUD, hdr_snapshot)
     // Unfocused (alt-tabbed): the compositor can hold the swapchain's images, and the generated frame's second
     // acquire + present then stalls the render thread - once behind, the frame rate never recovers (measured: a steady
     // 60 -> ~52 for the rest of the session after a focus change, while presenting once stays at 60). So present only
@@ -8809,6 +8835,7 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
     if (!fg_image(&prev, w, h) || !fg_image(&interp, w, h)) return;
     bool valid = vk_fg_mv && vk_fg_mv->image && vk_fg_mv_frame == frame && vk_fg_mv->width == w &&
                  vk_fg_mv->height == h && prev_frame + 1 == frame;
+    fg_live = valid;
     static int fglog = -1, nlog;
     if (fglog < 0) fglog = ENV("LARECOMP_FG_LOG") != NULL;
     if (nlog < 6 || (fglog && frame % 300 == 0)) {  // (the first few always: enough to see valid=1/0; the rest on request)
@@ -8824,13 +8851,14 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
         static VkDescriptorSetLayout dsl;
         static VkPipeline pipe;
         if (!pipe) {
-            VkDescriptorSetLayoutBinding bd[3] = {
+            VkDescriptorSetLayoutBinding bd[4] = {
                 {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
                 {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
-                {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
-            VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 3, .pBindings = bd};
+                {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+                {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
+            VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 4, .pBindings = bd};
             VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &dsl));
-            VkPushConstantRange pcr = {.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, .size = 32};
+            VkPushConstantRange pcr = {.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, .size = 48};
             VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
                                              .pSetLayouts = &dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr};
             VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &layout));
@@ -8870,12 +8898,27 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
         VkImageView pv = vk_image_view(&prev, VK_IMAGE_VIEW_TYPE_2D, prev.format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
         VkImageView cvv = vk_image_view(cur, VK_IMAGE_VIEW_TYPE_2D, cur->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
         VkImageView mvv = vk_image_view(vk_fg_mv, VK_IMAGE_VIEW_TYPE_2D, vk_fg_mv->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
-        VkDescriptorImageInfo ii[3] = {{lin, pv, VK_IMAGE_LAYOUT_GENERAL}, {lin, cvv, VK_IMAGE_LAYOUT_GENERAL}, {lin, mvv, VK_IMAGE_LAYOUT_GENERAL}};
-        VkWriteDescriptorSet wr[3];
-        for (int i = 0; i < 3; i++)
+        // the HUD mask's picture (fg_interp.frag base): cur before its HUD (hdr_snapshot). Only when read the same way
+        // as cur (an sRGB cur's copy is UNORM: every pixel would look like HUD) - otherwise cur, i.e. no mask, as before.
+        // This frame's only (fg_seq): an older copy of the same image is another picture - all of it "HUD".
+        TexBackend *snap = NULL;
+        for (int i = 0; i < 2; i++)
+            if (hdr_snaps[i].shown && hdr_snaps[i].shown->backend == cur && hdr_snaps[i].img.image && hdr_snaps[i].fg_seq == seq)
+                snap = &hdr_snaps[i].img;
+        if (snap && (snap->format != cur->format || snap->width != w || snap->height != h)) snap = NULL;
+        static unsigned snap_n[2];  // (frames without / with the HUD mask, logged with the fg log)
+        snap_n[snap != NULL]++;
+        static int nsnaplog;
+        if (nsnaplog++ < 3 || (fglog && frame % 300 == 0))
+            LOG("[fg] HUD kept still in %u of %u frames (no picture before the HUD in the rest)\n", snap_n[1], snap_n[0] + snap_n[1]);
+        VkImageView bv = snap ? vk_image_view(snap, VK_IMAGE_VIEW_TYPE_2D, snap->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT) : cvv;
+        VkDescriptorImageInfo ii[4] = {{lin, pv, VK_IMAGE_LAYOUT_GENERAL}, {lin, cvv, VK_IMAGE_LAYOUT_GENERAL},
+                                       {lin, mvv, VK_IMAGE_LAYOUT_GENERAL}, {lin, bv, VK_IMAGE_LAYOUT_GENERAL}};
+        VkWriteDescriptorSet wr[4];
+        for (int i = 0; i < 4; i++)
             wr[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = (uint32_t)i,
                                            .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[i]};
-        rec_UpdateDescriptorSets(3, wr);
+        rec_UpdateDescriptorSets(4, wr);
         VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = post_view(&interp),
                                         .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                                         .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
@@ -8893,13 +8936,19 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
         float thresh = g_settings.fg_thresh, strength = g_settings.fg_strength;
         static int mode_mid = -1;  // (LARECOMP_FG_MODE=interp: the frame between the last two, as before - fg_interp.frag)
         if (mode_mid < 0) { const char *e = ENV("LARECOMP_FG_MODE"); mode_mid = e && !strcmp(e, "interp"); }
-        // (debug) LARECOMP_FG_DUMP=<frame>: that frame's game image and generated frame, and the next frame's motion
-        // (drawn in place of its generated frame: fg_interp.frag par.w) -> build/fg_{cur,gen,mv}.png
+        // (debug) LARECOMP_FG_DUMP=<frame>: that frame's game image and generated frame, the next frame's game image
+        // and its motion (drawn in place of its generated frame: fg_interp.frag par.w) -> build/fg_{cur,gen,next,mv}.png.
+        // next(p) = cur(p + mv) where the motion is right: a check of its sign and size from two real frames
         static long dump = -2;
         if (dump == -2) dump = ENV("LARECOMP_FG_DUMP") ? atol(ENV("LARECOMP_FG_DUMP")) : -1;
-        float pc[8] = {1.0f / (float)w, 1.0f / (float)h, (float)w, (float)h, thresh, strength, mode_mid ? 1.0f : 0.0f,
-                       dump >= 0 && frame == (uint64_t)dump + 1 ? 1.0f : 0.0f};
-        rec_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
+        // the scene's part of the image (mv_view: handheld 1280x720 of 1920x1080), in uv; the whole image without one
+        bool vw_ok = mv_view[0] >= 0 && mv_view[1] >= 0 && mv_view[2] >= 1 && mv_view[3] >= 1 && mv_view[0] + mv_view[2] <= w + 0.5f &&
+                 mv_view[1] + mv_view[3] <= h + 0.5f;
+        float pc[12] = {1.0f / (float)w, 1.0f / (float)h, (float)w, (float)h, thresh, strength, mode_mid ? 1.0f : 0.0f,
+                        dump >= 0 && frame == (uint64_t)dump + 1 ? 1.0f : 0.0f,
+                        vw_ok ? mv_view[0] / w : 0, vw_ok ? mv_view[1] / h : 0, vw_ok ? (mv_view[0] + mv_view[2]) / w : 1,
+                        vw_ok ? (mv_view[1] + mv_view[3]) / h : 1};
+        rec_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
         fullscreen_vertex_bind(cb);
         rec_CmdDraw(cb, 3, 1, 0, 0);
         rec_CmdEndRendering(cb);
@@ -8909,10 +8958,12 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
         if (dump >= 0 && frame == (uint64_t)dump) {
             renderer_save_texture_tex(cur, "build/fg_cur.png");
             renderer_save_texture_tex(&interp, "build/fg_gen.png");
-            LOG("[fg] dump: frame %llu -> build/fg_cur.png, build/fg_gen.png (the motion next frame: build/fg_mv.png)\n",
+            LOG("[fg] dump: frame %llu -> build/fg_cur.png, build/fg_gen.png (next frame: build/fg_next.png, its motion build/fg_mv.png)\n",
                 (unsigned long long)frame);
-        } else if (dump >= 0 && frame == (uint64_t)dump + 1)
+        } else if (dump >= 0 && frame == (uint64_t)dump + 1) {
+            renderer_save_texture_tex(cur, "build/fg_next.png");
             renderer_save_texture_tex(&interp, "build/fg_mv.png");
+        }
         cb = vk_cmd();  // (the saves may have ended the pass and moved on in the command buffer)
     }
     fg_copy(cb, cur->image, prev.image, w, h);
@@ -8923,9 +8974,14 @@ void vk_fg_build(TexBackend *cur, uint64_t frame) {
 static void hdr_snapshot(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (!b->image || b->aspect != VK_IMAGE_ASPECT_COLOR_BIT || b->levels != 1 || b->layers != 1 || b->samples > 1) return;
+    // Frame generation alone: once a frame (vk_fg_build clears fg_snapped each present). HDR's rule, after every
+    // opaque draw, also fired on the HUD's own opaque draws - a full-image copy and a pass break each: on a Steam Deck
+    // the GPU wait went 9 -> ~900 ms per 2 s and the GPU hung within a minute of panning (2026-10-31).
+    if (!g_vk.hdr) fg_snapped = true;
     static int next;
     int k = hdr_snaps[0].shown == t ? 0 : hdr_snaps[1].shown == t ? 1 : !hdr_snaps[0].shown ? 0 : !hdr_snaps[1].shown ? 1 : (next ^= 1);
     hdr_snaps[k].shown = t;
+    hdr_snaps[k].fg_seq = fg_seq;
     TexBackend *d = &hdr_snaps[k].img;
     VkFormat f = b->format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM : b->format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM : b->format;
     if (d->image && (d->width != b->width || d->height != b->height || d->format != f)) {
@@ -8944,6 +9000,8 @@ static void hdr_snapshot(NvnTexture *t) {
         d->format = f; d->width = b->width; d->height = b->height; d->depth = 1; d->layers = 1; d->levels = 1;
         d->samples = 1; d->aspect = VK_IMAGE_ASPECT_COLOR_BIT; d->base_type = VK_IMAGE_VIEW_TYPE_2D;
         vk_image_init_layout(vk_cmd(), d->image, d->aspect);
+        static int nlog;  // (a few: more than two means the copies are being remade - their images alternate sizes)
+        if (nlog++ < 6) LOG("[%s] picture-before-HUD copy %d: %ux%u format %d\n", g_vk.hdr ? "hdr" : "fg", k, d->width, d->height, (int)d->format);
     }
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
