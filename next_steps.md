@@ -18,6 +18,42 @@ code between whatever v0.1.10 was based on and `v0.1.12` specifically, not assum
 Branch pushed to both remotes (`za-build20-targeted`), and all of tonight's prior `linux` work is separately
 preserved at `linux-pre-build20-rebase` in case this branch ends up replacing `linux` as mainline later.
 
+**Same night, continued: `za-build20-targeted` grew into a real, extensively-tested lean baseline.** On top of the
+state above, also added: `a2a22c4` (frame generation's real compute-queue presentation thread and extrapolation
+rework - the simpler `665a201` spacing fix alone wasn't enough for frame-gen to actually look smoother, just to be
+correctly *timed*; cherry-picked by hand, dropping the `ab_feat`/`ab_on` GPU-address-binding-report hunk that only
+exists because `a2a22c4` was rebased onto v0.1.12 upstream, which build #20 predates entirely), `5764022` (the
+`pokemon-za` process rename, renamed to **`pokeza-recomp`** instead so it's distinguishable from mainline `linux`'s
+build in `pgrep`/`top`/`htop` when testing both side by side), and a matching rename of the AppImage's own bundled
+binary/.desktop entry/icon (`tools/linux/package.sh`/`AppRun`/`pokeza-recomp.desktop` - only the AppDir's packaged
+copy, not the shared Makefile `EXE` variable Windows/macOS also use).
+
+- **Found and fixed a real bug in `2fcafbf` (the UI-separation/720p patch) itself**, not something to blame on the
+  rest of the branch: the Box menu's move list (on highlighting a Pokémon) and item list (on selecting one) came up
+  blank. Root cause: `renderer_set_ui_scale()` (`textures.c`) is called fresh every single present with a value that
+  can legitimately be 0 on any given frame (device.c's own degenerate-case guard, `uy < sy*1.01 || uy > 4`) - and
+  `tex_backend()` destroys and recreates any texture whose effective scale changed since it was created. A Box-menu
+  panel that's drawn once on a state change (not every frame) can get created on exactly the frame that guard fires
+  (built at the scene's scale), then see the real UI scale "arrive" a frame later - read by `tex_backend` as an
+  output-resolution change, destroying and recreating the texture and wiping the one-shot draw with nothing to
+  redraw it until the player changes the selection again. **Fixed** by making `g_ui_x`/`g_ui_y` sticky (ignore a 0
+  from the per-frame guard, keep the last real value) - confirmed working live on the Deck afterward. This is a
+  genuine, previously-unknown bug in upstream-adjacent code, found and fixed in one session.
+- **Zero crashes across this entire night's testing on this branch** - multiple sessions, varied content (including
+  the busy town area that reliably hit the shadow-caster crash on the full `linux` branch), `gpu_overlap` forced on
+  the whole time. This further strengthens (doesn't yet prove) the theory two paragraphs up: whatever causes the
+  shadow-caster/transform-feedback crash is not present - or not reachable - in this build #20-based lineage.
+- **Frame generation: mechanically confirmed working (valid motion data, correct half-frame compute-queue spacing,
+  near-zero drops, numbers matching `a2a22c4`'s own original Deck validation exactly), but not yet confirmed to
+  visually smooth anything.** `LARECOMP_FG_DUMP=1800` dump: `fg_cur.png` and `fg_gen.png` came back **byte-identical
+  (same SHA256)** - the generated frame was a verbatim copy of the current one for that specific dump.
+  `fg_interp.frag`'s own threshold logic (`fg_thresh = 2.0` px: below that, show the current frame exactly, by
+  design, so the HUD/a still camera never flickers) makes this the *expected* result if there was simply no camera
+  motion at that exact instant - which is the more likely explanation after reading `fg_interp.frag`/`fsr2_mv.frag`/
+  `inv4()` line by line and finding nothing structurally wrong. **Not re-tested yet with guaranteed continuous
+  motion through the dump frame** - the next real check, before concluding anything is actually broken here.
+- Branch and all commits pushed to both remotes throughout.
+
 **IDENTIFIED: the crash is upstream's own open issue #22, not a new bug (2026-10-30 night, start here).** Found a
 previous dev session's full transcript at `opencode/opencode.md` (2.5 MB, not ours - predates this session, kept for
 reference, see its own note below) and it names the exact mechanism. Z-A skins characters with **transform feedback**
