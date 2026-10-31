@@ -35,26 +35,8 @@ def _za_frame_dt(gen, a):
             f'  /* {a:#x}: ldr x8, [x1, #8] (frame duration -> world step, decoupled from the frame rate) */')
 
 
-# The frame clock's update loop hands each subsystem the frame's step: `mov w2, w20` (0xa0 after the config read).
-# In the game's 60 fps mode w20 is the configured 0 whatever the frame took, so the duration above never reaches it;
-# runtime/hle/framepace.c rt_za_frame_step hands on max(w20, the accumulator's step) instead, leaving the frame
-# clock's mode logic alone (LARECOMP_FRAME_STEP=0: w20). 2.0.2 only: the one build checked (1.0.0 / 2.0.0 likely
-# have it at the same offset, unverified - the assert would stop their builds).
-FRAME_STEP = {'b1f12fd919eae86a': ZA_BUILDS['b1f12fd919eae86a'] + 0xa0}  # 0x7001b29778
-
-
-def _za_frame_step(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
-    assert w == 0x2a1403e2, hex(w)  # mov w2, w20
-    return ('{ extern uint32_t rt_za_frame_step(uint32_t); '
-            'c->x[2] = rt_za_frame_step((uint32_t)c->x[20]); }'
-            f'  /* {a:#x}: mov w2, w20 (the subsystems\' step -> the decoupled one, any frame mode) */')
-
-
 def za_patches(build):
     out = {ZA_BUILDS[build]: _za_frame_cfg}
     if build in FRAME_DT:
         out[FRAME_DT[build]] = _za_frame_dt
-    if build in FRAME_STEP:
-        out[FRAME_STEP[build]] = _za_frame_step
     return out
