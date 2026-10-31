@@ -428,6 +428,7 @@ extern "C" bool menu_la_rows(void) { return menu_la_tabs; }  // (runtime/ui/cont
 extern "C" void renderer_get_scale(float *sx, float *sy);
 extern "C" int input_pad_family(void);  // runtime/hle/input.c
 extern "C" double output_scale_dynamic_factor(void);
+extern "C" int g_present_crop[4];  // (runtime/nvn/objects.c: the game's crop of its window texture - handheld 1280x720)
 
 static void tab_display(void) {
     float scale = ImGui::GetFontSize() / 34;
@@ -589,7 +590,9 @@ static void tab_display(void) {
                                          "fracas. Só 1x-4x são exatas: nos outros tamanhos (1.5x, Igual à tela, Dinâmica, "
                                          "as partes) alguns objetos podem sumir por um instante - sendo corrigido.\n\n"
                                          "Renderizando em %.0f x %.0f."),
-                         g_gpu_integrated ? TR(" (1x: 720p on this GPU)", " (1x: 720p nesta GPU)") : "", 1920.0 * sx, 1080.0 * sy);
+                         g_gpu_integrated ? TR(" (1x: 720p on this GPU)", " (1x: 720p nesta GPU)") : "",
+                         (g_present_crop[2] > 0 ? g_present_crop[2] : 1920.0) * sx,  // (the picture: handheld, the game's
+                         (g_present_crop[3] > 0 ? g_present_crop[3] : 1080.0) * sy); // 1280x720 of its 1920x1080 targets)
         if (g_settings.res_mode == RES_DYNAMIC)
             snprintf(d + n, sizeof d - n, TR(" Dynamic: %.0f%% of the display right now.", " Dinâmica: %.0f%% da tela agora."),
                      output_scale_dynamic_factor() * 100);
