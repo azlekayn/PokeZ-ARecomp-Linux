@@ -2417,7 +2417,10 @@ extern "C" void launcher_run(const char *root) {
                     if (g_save_time) chip(dl, cx, ty, IC_SAVE, std::string(TR("Save from ", "Save de ")) + fmt_time(g_save_time));
                     ty += 34 + 34;
                     bool pressed = button("##play", TR("PLAY", "JOGAR"), x, ty, 0, 68, BTN_PRIMARY, true, IC_PLAY, F_BTN, 26);
-                    if (g_focus_play) ImGui::SetKeyboardFocusHere(-1), g_focus_play = false;
+                    // (with its cursor shown: ImGui activates the focused item on A / Enter only while the cursor is
+                    // visible, and a focus request alone keeps it hidden - the first press only revealed it, a
+                    // second one played. Now A on opening plays; a mouse move hides the cursor as usual)
+                    if (g_focus_play) ImGui::SetKeyboardFocusHere(-1), ImGui::SetNavCursorVisible(true), g_focus_play = false;
                     float pw = ImGui::GetItemRectSize().x / g_s;
                     if (button("##chg", TR("Change game folder", "Trocar pasta do jogo"), x + pw + 14, ty + 8, 0, 52, BTN_SECONDARY,
                                true, IC_FOLDER)) {

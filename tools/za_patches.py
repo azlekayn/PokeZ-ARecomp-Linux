@@ -40,14 +40,18 @@ def _za_frame_dt(gen, a):
 # runtime/hle/framepace.c rt_za_frame_step hands on max(w20, the accumulator's step) instead, leaving the frame
 # clock's mode logic alone (LARECOMP_FRAME_STEP=0: w20). 2.0.2 only: the one build checked (1.0.0 / 2.0.0 likely
 # have it at the same offset, unverified - the assert would stop their builds).
+# The subsystem's index (w22, the loop's counter) goes along: the subsystems are the game's clock channels - each
+# update call only stores its channel's step (under 1 us), what reads it runs later - and channel 0 keeps the game's
+# own step (framepace.c rt_za_frame_step: two ticks there leave the player stuck after a roll).
+# (c->x[22] is current here: regpromote.py leaves patched functions' registers in the Cpu struct.)
 FRAME_STEP = {'b1f12fd919eae86a': ZA_BUILDS['b1f12fd919eae86a'] + 0xa0}  # 0x7001b29778
 
 
 def _za_frame_step(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
     assert w == 0x2a1403e2, hex(w)  # mov w2, w20
-    return ('{ extern uint32_t rt_za_frame_step(uint32_t); '
-            'c->x[2] = rt_za_frame_step((uint32_t)c->x[20]); }'
+    return ('{ extern uint32_t rt_za_frame_step(uint32_t, uint32_t); '
+            'c->x[2] = rt_za_frame_step((uint32_t)c->x[20], (uint32_t)c->x[22]); }'
             f'  /* {a:#x}: mov w2, w20 (the subsystems\' step -> the decoupled one, any frame mode) */')
 
 

@@ -108,6 +108,8 @@ uint64_t rt_za_frame_dt(uint64_t real_ns) {
     // override.)
     static uint64_t acc, last_ns;
     static bool was_on;
+    extern void za_probe_frame(void);  // (za_probe.c: LARECOMP_PLAYER_PROBE, once a frame - this is the frame clock)
+    za_probe_frame();
     if (!g_settings.frame_dt) { was_on = false, za_step_n = 0; return real_ns; }
     // The duration the game hands us ([x1,#8]) is NOT its frame period: measured at a steady 60 fps it is ~8.5 ms (its
     // CPU-busy time), so the game's own bands read 0 every frame and an accumulator built on it never advances the
@@ -157,11 +159,52 @@ uint64_t rt_za_frame_dt(uint64_t real_ns) {
 // subsystems get max(the game's step, the accumulator's), the frame clock's own choice and mode untouched (forcing
 // its measured-duration flag instead flipped its 60 / 30 controller and doubled the speed: reverted 9290029).
 // LARECOMP_FRAME_STEP=0: the game's step, as before.
-uint32_t rt_za_frame_step(uint32_t game_step) {
+// The loop's "subsystems" are the game's clock channels: each update call only stores its channel's step (they all
+// took under 1 us, timed on the Deck in b74), and what reads a channel runs later. Channel 0 keeps
+// the game's own step: given two ticks in the game's 60 fps mode - which never hands a channel more than one - it left
+// the player stuck after a roll over changing ground height, roll / crouch / walk refused for good and turning still
+// allowed (Steam Deck at ~48 fps, 2026-11-01). Found by bisecting the channels on a save that got stuck within a
+// minute: channel 0 alone on one tick - never stuck, the world at full speed; channel 0 alone on two ticks - stuck,
+// and slow (the world's speed is in the other channels). Calling a channel twice with one tick each (b73's sub-steps)
+// only stored the one tick twice: the world slowed down.
+// The 60 fps mode only (the game's step 0): its 30 fps mode hands every channel two ticks itself, and keeps the
+// decoupled catch-up on all of them as before. Channel 0 is the index the Deck bisect found (empirical: the channels'
+// order isn't known from the code - the count is logged once, "[pace] clock channels: 11", so another layout shows).
+// LARECOMP_FRAME_STEP_KEEP=<i>,<j>...: the channels that keep the game's step (decimal; default 0, "none": every one
+// takes the decoupled step, as before).
+static bool keeps_game_step(uint32_t channel) {
+    static int init;
+    static uint64_t mask = 1;  // (channel 0)
+    if (!init) {
+        init = 1;
+        const char *e = ENV("LARECOMP_FRAME_STEP_KEEP");
+        if (e && *e) {  // (set but empty: the default, not "none")
+            mask = 0;
+            for (const char *p = e; *p;) {
+                char *end;
+                unsigned long v = strtoul(p, &end, 10);
+                if (end == p) break;
+                if (v < 64) mask |= 1ull << v;
+                p = *end ? end + 1 : end;
+            }
+            LOG("[pace] clock channels keeping the game's step: %s\n", e);
+        }
+    }
+    return channel < 64 && (mask >> channel & 1);
+}
+uint32_t rt_za_frame_step(uint32_t game_step, uint32_t channel) {
     static int on = -1;
     if (on < 0) { const char *e = ENV("LARECOMP_FRAME_STEP"); on = !e || atoi(e) != 0; }
-    if (!on || !g_settings.frame_dt) return game_step;
-    return za_step_n > game_step ? za_step_n : game_step;
+    extern void za_probe_step(uint32_t game_step, uint32_t step);  // (za_probe.c: the steps handed out)
+    static uint32_t last_channel;
+    static bool counted;
+    if (!counted && channel == 0 && last_channel > 0) counted = true, LOG("[pace] clock channels: %u\n", last_channel + 1);
+    last_channel = channel;
+    uint32_t out = !on || !g_settings.frame_dt || (game_step == 0 && keeps_game_step(channel)) ? game_step
+                 : za_step_n > game_step                                                       ? za_step_n
+                                                                                               : game_step;
+    za_probe_step(game_step, out);
+    return out;
 }
 
 int32_t rt_za_frame_cfg(int32_t cfg) {
