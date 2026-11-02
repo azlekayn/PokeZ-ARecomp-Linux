@@ -6827,7 +6827,8 @@ static void draw_(CmdRec *r, bool indexed) {
     uint32_t npc = pass_ncolor < 8 ? pass_ncolor : 8;
     prof_key_draws++;
     PipeKey k;
-    VtxLayout vl;  // the draw's vertex layout (on a memo hit: the memo's, made from the same inputs)
+    VtxLayout layout;
+    const VtxLayout *vl;  // (memo hit: read its 528-byte layout in place, not a per-draw stack copy)
     Pipe *pp;
     if (pm && pm->pp && pm->gen == key_gen && pm->ncolor == pass_ncolor && pm->samples == pass_samples && pm->depth == pass_depth &&
         pm->stencil == pass_stencil && pm->nattrib == st.nattrib && pm->nstream == st.nstream && pm->channel_mask == in.channel_mask &&
@@ -6838,9 +6839,10 @@ static void draw_(CmdRec *r, bool indexed) {
         !memcmp(pm->blend, st.blend, sizeof pm->blend)) {
         prof_pipe_memo++;
         pp = pm->pp;
-        vl = pm->vl;  // (the key leaves the layout out with dynamic vertex input: kept with the memo)
+        vl = &pm->vl;  // (the key leaves the layout out with dynamic vertex input: kept with the memo)
     } else {
-        pipe_key_fill(&k, pr, &in, pass_color, pass_ncolor, pass_depth, pass_stencil, pass_samples, &vl);
+        pipe_key_fill(&k, pr, &in, pass_color, pass_ncolor, pass_depth, pass_stencil, pass_samples, &layout);
+        vl = &layout;
         k.depth_clamp = dclamp, k.restart = restart;
         if (g_vkc.no_eds1) k.fx = fx;
         uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
@@ -6880,7 +6882,7 @@ static void draw_(CmdRec *r, bool indexed) {
             memcpy(pm->attrib, st.attrib, sizeof pm->attrib); memcpy(pm->stream, st.stream, sizeof pm->stream);
             memcpy(pm->blend, st.blend, sizeof pm->blend);
             pm->pp = pp;
-            pm->vl = vl;
+            pm->vl = *vl;
         }
     }
     {   // a pipeline still building: the draw is skipped (as on Metal) - unless the recorder waits for it at the bind
@@ -6892,7 +6894,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     ss_enabled();
     if (ss_need(SS_PIPE, ss.pipe == pp)) { ss.pipe = pp; rec_CmdBindPipelineObj(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp); }
-    if (g_vk.vids && ss_need(SS_VI, !memcmp(&ss.vi, &vl, sizeof vl))) { ss.vi = vl; set_vertex_input(cb, &vl); }
+    if (g_vk.vids && ss_need(SS_VI, !memcmp(&ss.vi, vl, sizeof *vl))) { ss.vi = *vl; set_vertex_input(cb, vl); }
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_key += prof_td_ - prof_tk_;
 
@@ -7167,7 +7169,7 @@ static void draw_(CmdRec *r, bool indexed) {
 
     // ---- vertex streams: the range this draw can read, copied once per submission
     for (int s = 0; s < 17; s++) {
-        if (!(vl.used_streams & (1u << s))) continue;
+        if (!(vl->used_streams & (1u << s))) continue;
         VkSpan sp;
         if (s == ZERO_BINDING) {
             static const float zero[4] = {0, 0, 0, 1};
@@ -7189,13 +7191,13 @@ static void draw_(CmdRec *r, bool indexed) {
                 if (base_vertex > 0) max_index += (uint32_t)base_vertex;
                 scan_src = NULL;
             }
-            uint64_t stride = vl.stride[s], need;
+            uint64_t stride = vl->stride[s], need;
             if (!stride) need = 256;
-            else if (vl.divisor[s] && g_ind_gpu) need = v.size ? v.size : 1u << 20;  // (instances only the GPU knows: all)
+            else if (vl->divisor[s] && g_ind_gpu) need = v.size ? v.size : 1u << 20;  // (instances only the GPU knows: all)
             // (Vulkan applies the first instance outside the divisor: instance i reads element base_inst + i / divisor -
             // the copy runs from the binding's start, so up to base_inst + inst covers it, the runs below included; it
             // was (base_inst + inst) / divisor: short when both are over 1 - found by gabrielsem16-bot, #39)
-            else if (vl.divisor[s]) need = ((uint64_t)base_inst + inst) * stride + 256;
+            else if (vl->divisor[s]) need = ((uint64_t)base_inst + inst) * stride + 256;
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
             if (!v.addr) { static const uint8_t zero[256]; sp = vk_transient_copy(zero, 256, 16); }
