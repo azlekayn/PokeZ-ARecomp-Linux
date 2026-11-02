@@ -6356,6 +6356,16 @@ static uint32_t stencil_slots(int stage, uint32_t *sint) {
     if (!st.tpool) return 0;
     static int nomemo = -1;
     if (nomemo < 0) nomemo = ENV("LARECOMP_VK_NO_SLOT_MEMO") != NULL;
+    // Most draws keep a stage's handles: one contiguous compare instead of 32 scattered entry-memo probes. The
+    // lifetime is the same submitted list as the entry memo (not a frame); the kill switch bypasses both levels.
+    static struct { const NvnDescPool *pool; const void *entries; int count; uint32_t gen, uint_slots, sint_slots;
+                    uint64_t handles[32]; } last[6];
+    __typeof__(last[0]) *l = &last[stage];
+    if (!nomemo && l->pool == st.tpool && l->entries == st.tpool->entries && l->count == st.tpool->count && l->gen == exec_gen &&
+        !memcmp(l->handles, st.tex[stage], sizeof l->handles)) {
+        *sint = l->sint_slots;
+        return l->uint_slots;
+    }
     static struct { const NvnDescPool *pool; uint32_t tic, gen; int kind; } memo[4096];
     for (int s = 0; s < 32; s++) {
         uint64_t h = st.tex[stage][s];
@@ -6371,6 +6381,11 @@ static uint32_t stencil_slots(int stage, uint32_t *sint) {
         }
         if (k == 1) m |= 1u << s;
         if (k == 2) *sint |= 1u << s;
+    }
+    if (!nomemo) {
+        l->pool = st.tpool; l->entries = st.tpool->entries; l->count = st.tpool->count; l->gen = exec_gen;
+        l->uint_slots = m; l->sint_slots = *sint;
+        memcpy(l->handles, st.tex[stage], sizeof l->handles);
     }
     return m;
 }
