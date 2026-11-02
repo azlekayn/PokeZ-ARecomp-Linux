@@ -3838,10 +3838,8 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
 // and the ranges of the previous frame whose contents the game rewrote by the time this frame is translated: with
 // the frame fence deferred (overlap) the GPU may still read them - the racing data. kind: 0 vertex, 1 index,
 // 2 storage (a draw's read), 3 compute slot.
-static void bind_note(int kind, uint64_t addr, uint64_t size) {
-    static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_LOG_BINDS") != NULL;
-    if (!on || addr < HEAP_BASE || addr - HEAP_BASE + size > HEAP_MAX || size < 8) return;
+static __attribute__((cold, noinline)) void bind_note_(int kind, uint64_t addr, uint64_t size) {
+    if (addr < HEAP_BASE || addr - HEAP_BASE + size > HEAP_MAX || size < 8) return;
     extern int nvn_pool_flags_at(uint64_t addr);
     enum { REC = 8192 };
     static struct { uint64_t addr, size, hash; uint8_t kind; } rec[REC];
@@ -3881,6 +3879,11 @@ static void bind_note(int kind, uint64_t addr, uint64_t size) {
     uniq[kind] += size;
     int pf = nvn_pool_flags_at(addr);
     if (pf < 0 || !(pf & 1)) wr[kind] += size;  // (distinct bytes in pools the CPU can write: what a snapshot would copy)
+}
+static void bind_note(int kind, uint64_t addr, uint64_t size) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_LOG_BINDS") != NULL;
+    if (on) bind_note_(kind, addr, size);
 }
 
 // Before a draw (stages 0 and 1: the slots the shader reads addresses of, si->ssbo_read) or a dispatch (stage 5: every
@@ -6311,7 +6314,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
 }
 
 // ================================================================== draws
-static void debug_draw(Prog *pr, CmdRec *r, bool indexed);
+static __attribute__((cold, noinline)) void debug_draw(Prog *pr, CmdRec *r, bool indexed);
 
 // Quads / fans / polygons as a 32-bit triangle index list.
 static uint32_t *expand_indices(uint32_t mode, uint32_t count, const void *indices, int itype, uint32_t first, uint32_t *out_count) {
@@ -6697,6 +6700,33 @@ static uint64_t prof_tp_;
 static bool fsr2_copy(Prog *pr);
 static bool water_is_surface(Prog *pr);
 static void water_before(void);
+
+// Diagnostics stay at their original points in the draw (and every checkpoint still goes through the recorder).
+// dl_on starts at -1: the first draw must enter draw_trace to let dl_note initialize it, even when tracing is off.
+static __attribute__((cold, noinline)) void draw_trace(VkCommandBuffer cb, bool ind_ok) {
+    dl_note("draw vs %llx fs %llx%s xfb %d", (unsigned long long)st.program->stages[0].code_addr,
+            (unsigned long long)st.program->stages[1].code_addr, g_ind_gpu && ind_ok ? " indirect" : "", xfb_on);
+    if (g_ind_gpu && ind_ok && dl_on > 0) {
+        dl_args[(dl_n - 1) & (DL_N - 1)] = g_ind_pa;  // (the guest block, also when a private record is drawn: ia_claim)
+        memcpy(dl_snap[(dl_n - 1) & (DL_N - 1)], (const void *)(uintptr_t)g_ind_pa, 20);
+    }
+    if (dl_on > 0) vk_checkpoint(cb, dl_n);
+}
+static __attribute__((cold, noinline)) void draw_gp_note(void) {
+    if (!gp_draws[gp_n - 1]) {  // first draw of the row: its fragment shader hash
+        size_t l = strlen(gp_label[gp_n - 1]);
+        snprintf(gp_label[gp_n - 1] + l, sizeof gp_label[0] - l, ", first fs %016llx", (unsigned long long)g_cur_fs_hash);
+    }
+    gp_draws[gp_n - 1]++;
+}
+static __attribute__((cold, noinline)) void draw_viewport_note(float vx, float vw, float k) {
+    const float *vp = st.viewport[0];
+    VkRect2D sr = scissor_rect();
+    LOG("[draw]   vp %.2f %.2f %.2f %.2f (stretch %.3f, fs hash %016llx) scissor %d %d %u %u | guest sc %d %d %d %d | pass %ux%u s %.4f %.4f\n",
+        vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, k, (unsigned long long)g_cur_fs_hash, sr.offset.x, sr.offset.y,
+        sr.extent.width, sr.extent.height, st.scissor[0][0], st.scissor[0][1], st.scissor[0][2], st.scissor[0][3], pass_w, pass_h,
+        vp_sx, vp_sy);
+}
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     if (!st.program) { SKIP(SK_NO_PROGRAM); return; }
@@ -7105,13 +7135,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if ((fsr2_jx != 0 || fsr2_jy != 0) && fsr2_scene_pass())  // (FSR 2: the frame's sub-pixel offset)
             vx += fsr2_jx * vw / (float)fsr2_scene_w, vy += fsr2_jy * fabsf(vp[3] * vp_sy) / (float)fsr2_scene_h;
         set_viewport(vx, vy, vw, vp[3] * vp_sy, zn, zf);
-        if (g_debug_frame) {
-            VkRect2D sr = scissor_rect();
-            LOG("[draw]   vp %.2f %.2f %.2f %.2f (stretch %.3f, fs hash %016llx) scissor %d %d %u %u | guest sc %d %d %d %d | pass %ux%u s %.4f %.4f\n",
-                vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, k, (unsigned long long)g_cur_fs_hash, sr.offset.x, sr.offset.y,
-                sr.extent.width, sr.extent.height, st.scissor[0][0], st.scissor[0][1], st.scissor[0][2], st.scissor[0][3], pass_w, pass_h,
-                vp_sx, vp_sy);
-        }
+        if (g_debug_frame) draw_viewport_note(vx, vw, k);
     }
     apply_scissor();
     float rs0[4] = {vp_sx, vp_sy, vp_ox, vp_oy};
@@ -7276,22 +7300,10 @@ static void draw_(CmdRec *r, bool indexed) {
         } else if (!use_index) rec_CmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else rec_CmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
     }
-    dl_note("draw vs %llx fs %llx%s xfb %d", (unsigned long long)st.program->stages[0].code_addr,
-            (unsigned long long)st.program->stages[1].code_addr, g_ind_gpu && ind_ok ? " indirect" : "", xfb_on);
-    if (g_ind_gpu && ind_ok && dl_on > 0) {
-        dl_args[(dl_n - 1) & (DL_N - 1)] = g_ind_pa;  // (the guest block, also when a private record is drawn: ia_claim)
-        memcpy(dl_snap[(dl_n - 1) & (DL_N - 1)], (const void *)(uintptr_t)g_ind_pa, 20);
-    }
-    if (dl_on > 0) vk_checkpoint(cb, dl_n);
+    if (dl_on) draw_trace(cb, ind_ok);
     stat_draws++;
     cum_draws++;
-    if (g_gpuprof_frame && gp_n) {
-        if (!gp_draws[gp_n - 1]) {  // first draw of the row: its fragment shader hash
-            size_t l = strlen(gp_label[gp_n - 1]);
-            snprintf(gp_label[gp_n - 1] + l, sizeof gp_label[0] - l, ", first fs %016llx", (unsigned long long)g_cur_fs_hash);
-        }
-        gp_draws[gp_n - 1]++;
-    }
+    if (g_gpuprof_frame && gp_n) draw_gp_note();
 }
 
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
