@@ -4397,8 +4397,24 @@ void backend_guest_heap_prepare(void) {
     if (gmem_dmabuf) { plat_write_tracking_off("the guest heap is driver memory"); return; }
     if (!g_vk.host_import || getenv("LARECOMP_VK_NO_GMEM") || g_vk.props.vendorID == 0x10DE) return;
     gmem_userptr = true;
-    plat_write_tracking_off(gc_lazy ? "the guest heap is imported in userptr chunks" : "the guest heap is a userptr import");
+    // Tracking stays on for memory no import covers (pages_written refuses every query that could protect a page inside
+    // one): Pokémon Z-A's textures sit in its alias region below the window's 256-320 MB import, and without tracking
+    // each of their upload checks sampled 4096 scattered places (~6500 checks a second in Lumiose, ~10 % of the Steam
+    // Deck's render thread). The storage write watch and the vertex cache stay off as before (they ask about imported
+    // memory). LARECOMP_VK_TRACK_OUTSIDE=0: tracking off with any userptr import, as before.
+    const char *to = getenv("LARECOMP_VK_TRACK_OUTSIDE");
+    if (to && !atoi(to)) plat_write_tracking_off(gc_lazy ? "the guest heap is imported in userptr chunks" : "the guest heap is a userptr import");
+    else LOG("[vk] page write tracking kept for memory outside the userptr heap import (texture upload checks; LARECOMP_VK_TRACK_OUTSIDE=0: off)\n");
 #endif
+}
+// (userptr imports) Could a tracking query over [addr, addr + size) protect a page some import covers? The whole
+// window and the heap count (lazy chunks come and go; the window's import is its top part): only memory outside both
+// is queried. A protected page inside a userptr buffer is an MMU-notifier invalidation: amdgpu waits for the GPU (#181).
+static bool userptr_overlaps(uint64_t addr, uint64_t size) {
+    if (!gmem_userptr) return false;
+    uint64_t wl = gwin_base, wh = gwin_base + gwin_max;
+    if (addr < wh && wl < addr + size) return true;
+    return addr < HEAP_BASE + HEAP_MAX && HEAP_BASE < addr + size;
 }
 
 static uint64_t gmem_tried;  // heap size the import was last attempted for (gmem_info imports / re-imports)
@@ -5259,12 +5275,13 @@ static int pt_state = -1;  // 1: tracking, 0: none
 static bool pt_init(void) {
     if (pt_state >= 0) return pt_state;
     uint64_t pg = VC_PAGE, one;
-    int n = plat_written_pages(gwin_base, VC_PAGE, &one, 1, &pg);  // (is there write tracking?)
+    // (is there write tracking? With a userptr import: a page of the game's code instead, which no import covers)
+    int n = plat_written_pages(gmem_userptr ? MAIN_BASE : gwin_base, VC_PAGE, &one, 1, &pg);
     pt_state = n >= 0 && pg == VC_PAGE;
     if (!pt_state) { LOG("[vk] no page write tracking (%d, page %llu)\n", n, (unsigned long long)pg); return false; }
     vc_page_gen = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_gen);
     vc_page_gpu = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_gpu);
-    vc_page_gen[0] = ++vc_gen;  // (the probe took page 0's tracking)
+    vc_page_gen[0] = ++vc_gen;  // (the probe took page 0's tracking - or, userptr, main's first page: never asked about)
     return true;
 }
 
@@ -5303,6 +5320,9 @@ static int pages_changed_outside(uint64_t addr, uint64_t size, uint32_t since, u
 // checks; the storage write watch asks about the CPU alone). *now: the generation to pass next time.
 static int pages_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now, bool gpu_unknown) {
     if (!size || !pt_init()) return -1;
+    // userptr import: only the texture checks ask (the storage write watch and the vertex cache stay off as before), and
+    // only about memory no import covers
+    if (gmem_userptr && (!gpu_unknown || userptr_overlaps(addr, size))) return -1;
     if (addr < gwin_base || addr - gwin_base + size > gwin_max) {
         static int outside = -1;  // LARECOMP_VK_PAGES_OUTSIDE=0: unknown there, as before
         if (outside < 0) { const char *e = ENV("LARECOMP_VK_PAGES_OUTSIDE"); outside = !e || atoi(e) != 0; }

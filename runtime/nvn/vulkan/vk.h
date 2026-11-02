@@ -217,6 +217,7 @@ typedef struct TexBackend {
     bool prefetched;  // (uploaded at its registration, not drawn yet: textures.c backend_prefetch_texture)
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
     uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
+    uint8_t calm;   // upload checks in a row that found it unchanged (textures.c: a longer interval between checks)
     bool scalable, presented;
     bool ui;  // a window texture with its own scale, the UI scale (textures.c g_ui_x: the HUD at the window's resolution)
     uint64_t touched_frame, frame_cleared;

@@ -1047,7 +1047,21 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (b->uploaded && b->checked_frame == frame) return;
     // (a prefetched one: checked at its first use after that frame, not 1 frame in 8 - the game may have written its
     // data after registering it - and a change found then doesn't make it dynamic)
-    if (b->uploaded && !b->dynamic && !b->prefetched && ((frame + ((uintptr_t)b >> 6)) & 7)) return;
+    // A texture never seen changing is checked 1 frame in 8 - and once it passed 8 checks in a row unchanged, 1 in 16, then
+    // 1 in 32 after 16 (~0.5 s at 60 fps). Without page write tracking (a userptr heap import: the Steam Deck) each check is
+    // a 4096-place sample or, up to 64 KB, a full hash: ~6500 checks a second in Lumiose, ~10% of the render thread, all
+    // finding nothing. A first change is seen up to that much later; from then on the texture is dynamic (every frame).
+    // LARECOMP_TEX_CHECK_MAX=<frames> (a power of two, 8..256): the longest interval; 8 = 1 in 8 always, as before.
+    static uint32_t check_max;
+    if (!check_max) {
+        const char *e = ENV("LARECOMP_TEX_CHECK_MAX");
+        uint32_t v = e ? (uint32_t)atoi(e) : 32;
+        check_max = 8;
+        while (check_max < v && check_max < 256) check_max <<= 1;
+    }
+    uint32_t every = b->calm >= 16 ? 32 : b->calm >= 8 ? 16 : 8;
+    if (every > check_max) every = check_max;
+    if (b->uploaded && !b->dynamic && !b->prefetched && ((frame + ((uintptr_t)b >> 6)) & (every - 1))) return;
     const FormatInfo *fi = t->layout.fmt;
     if (!fi || !fi->bpb) return;
     VkFmt mf = fmt_of(t->format);
@@ -1087,7 +1101,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
         if (ch >= 0) {
             b->wgen = now;
             if (!ch && b->uploaded && !restyle) {
-                if (!periodic) { prof_tex_watch_skips++; return; }
+                if (!periodic) { prof_tex_watch_skips++; if (b->calm < 255) b->calm++; return; }
                 tracked_clean = true;
                 if (b->dynamic) full_hash_budget -= total;  // (the others took theirs above)
             }
@@ -1097,13 +1111,14 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (!full && !restyle) {
         prof_tex_samples++;
         uint64_t sh = fast ? tex_hash_sample(mem, total) : fnv_sample(mem, total);
-        if (sh == b->sample_hash) return;
+        if (sh == b->sample_hash) { if (b->calm < 255) b->calm++; return; }
     }
     prof_tex_full++; prof_tex_full_bytes += total; if (b->dynamic) prof_tex_dyn++;
     extern void slow_note_full_hash(void), slow_note_upload(uint64_t bytes);  // (slowframe.h)
     slow_note_full_hash();
     uint64_t h = fast ? tex_hash_full(mem, total) : hash_full(mem, total);
     b->full_frame = frame;
+    if (!b->uploaded || h != b->data_hash) b->calm = 0;  // (a change: back to 1 check in 8 - the safety net finding none keeps it)
     // (the sample is only compared while the texture isn't dynamic, and a dynamic one stays so: none for those)
     if (!fast) b->sample_hash = fnv_sample(mem, total);
     else if (!b->dynamic && !(b->uploaded && h != b->data_hash)) b->sample_hash = tex_hash_sample(mem, total);
