@@ -43,6 +43,9 @@ typedef struct {
     uint8_t topo;            // primitive class: 0 points, 1 lines, 2 triangles
     uint8_t poly_fill;       // filled polygons (0: lines)
     uint32_t local[3];       // compute: local size
+    // (Vulkan) the fragment shader's texture slots read as unsigned / signed integers (ShaderKey stencil_slots /
+    // sint_slots: a stencil view or an integer format there) - a variant of its own. Written only when not 0
+    uint32_t stencil_slots, sint_slots;
 } ShaderRec;
 
 // The record's text form (one line, no newline) and back

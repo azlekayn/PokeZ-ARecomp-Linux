@@ -2326,6 +2326,13 @@ static uint64_t prog_content_key(uint64_t vh, uint64_t fh, const ShaderKey *vkey
     b = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    // (the fragment's integer texture slots too, as get_program_'s own key has them: a prepared program is built with
+    // none, so a draw sampling a stencil / integer texture through such a slot took the prepared one - its float sampler
+    // read the texture's bits as floats. Now that draw gets its own variant: translated at its first use, and recorded
+    // with its slots (ShaderRec stencil_slots / sint_slots), so the next start prepares it like the others)
+    const uint32_t sl[2] = {fkey->stencil_slots, fkey->sint_slots};
+    b = (const uint8_t *)sl;
+    for (size_t i = 0; i < sizeof sl; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
     return h;
 }
 
@@ -2381,20 +2388,24 @@ static bool key_memo_on(void) {
 
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey);
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
-    static struct { uint64_t code[2], fp[2]; ShaderKey vkey; uint8_t rt[8]; uint32_t gen; Prog *prog; } m;
+    // (everything get_program_'s key holds of the fragment key: its render target kinds and its integer texture slots -
+    // the slots were left out, so a draw that changed only them reused the previous draw's variant and sampled a
+    // stencil / integer texture through a float sampler, or the other way round)
+    static struct { uint64_t code[2], fp[2]; ShaderKey vkey; uint8_t rt[8]; uint32_t stencil, sint, gen; Prog *prog; } m;
     bool on = key_memo_on();
     // (the code fingerprints too: other code at the same address is another program - code_fp)
     uint64_t fp0 = code_fp(&np->stages[0]), fp1 = code_fp(&np->stages[1]);
     if (on && m.prog && m.gen == key_gen && (np->stage_mask & 3) == 3 && m.code[0] == np->stages[0].code_addr &&
         m.code[1] == np->stages[1].code_addr && m.fp[0] == fp0 && m.fp[1] == fp1 && !memcmp(&m.vkey, vkey, sizeof *vkey) &&
-        !memcmp(m.rt, fkey->rt_kind, 8)) {
+        !memcmp(m.rt, fkey->rt_kind, 8) && m.stencil == fkey->stencil_slots && m.sint == fkey->sint_slots) {
         prof_prog_memo++;
         return m.prog;
     }
     Prog *p = get_program_(np, vkey, fkey);
     if (on && p) {
         m.code[0] = np->stages[0].code_addr; m.code[1] = np->stages[1].code_addr; m.fp[0] = fp0; m.fp[1] = fp1;
-        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.gen = key_gen; m.prog = p;
+        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.stencil = fkey->stencil_slots; m.sint = fkey->sint_slots;
+        m.gen = key_gen; m.prog = p;
     }
     return p;
 }
@@ -6124,6 +6135,7 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
     vkey.flip_x = fkey.flip_x = (r->flags & SR_FLIP_X) != 0;
     for (int i = 0; i < r->nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(r->attrib[i] & 0xFF);
     for (int i = 0; i < r->ncolor && i < 8; i++) if (r->color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(r->color[i]);
+    fkey.stencil_slots = r->stencil_slots, fkey.sint_slots = r->sint_slots;  // (draw_'s stencil_slots: none in older lines)
     uint64_t ck = prog_content_key(r->vs, r->fs, &vkey, &fkey);
     Prog *p = PREP_GET(prep_progs, ck);
     if (!p) {
@@ -6924,6 +6936,7 @@ static void draw_(CmdRec *r, bool indexed) {
             if (shader_rec_recording()) {
                 ShaderRec rec;
                 rec_from_state(&rec, vkey.flip_x, mode);
+                rec.stencil_slots = fkey.stencil_slots, rec.sint_slots = fkey.sint_slots;  // (its own variant: get_program)
                 shader_rec_note(&rec);
                 shader_seen_code(rec.vs, &st.program->stages[0]);  // (their code for the next start's preparation)
                 shader_seen_code(rec.fs, &st.program->stages[1]);
@@ -6936,6 +6949,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 if (prep_check_on()) {
                     ShaderRec rec;
                     rec_from_state(&rec, vkey.flip_x, mode);
+                    rec.stencil_slots = fkey.stencil_slots, rec.sint_slots = fkey.sint_slots;
                     prep_check(&k, vh, fh, &rec);
                 }
                 pp = calloc(1, sizeof *pp);

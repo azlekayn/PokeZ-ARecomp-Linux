@@ -62,6 +62,8 @@ uint8_t shader_topo_class(uint32_t mode) { return mode == 0 ? 0 : mode == 1 || m
 // ------------------------------------------------------------------ text form
 // G vs=<hash> fs=<hash> f=<flags> a=<attrib,...> s=<stride/divisor,...> c=<format[:view],...> d=<depth> n=<samples>
 //   m=<channel mask> b=<blend enables> B=<blend state of each target, 16 hex digits,...> k=<a2c> t=<topology> p=<fill>
+//   [ss=<stencil / unsigned integer texture slots> si=<signed integer texture slots>] (only when not 0: older lines
+//   read as none, and the lines of variants without them stay as they were)
 // C cs=<hash> l=<x,y,z>
 void shader_rec_format(const ShaderRec *r, char *out, size_t n) {
     size_t o = 0;
@@ -88,6 +90,7 @@ void shader_rec_format(const ShaderRec *r, char *out, size_t n) {
         for (int k = 0; k < 8; k++) PUT("%02x", r->blend[i][k]);
     }
     PUT(" k=%u t=%u p=%u", r->a2c, r->topo, r->poly_fill);
+    if (r->stencil_slots || r->sint_slots) PUT(" ss=%x si=%x", r->stencil_slots, r->sint_slots);
 #undef PUT
 }
 
@@ -174,6 +177,8 @@ bool shader_rec_parse(const char *line, ShaderRec *r) {
     if ((v = field(line, "k"))) r->a2c = (uint8_t)strtoul(v, NULL, 16);
     r->topo = (v = field(line, "t")) ? (uint8_t)strtoul(v, NULL, 16) : 2;
     r->poly_fill = (v = field(line, "p")) ? (uint8_t)strtoul(v, NULL, 16) : 1;
+    if ((v = field(line, "ss"))) r->stencil_slots = (uint32_t)strtoul(v, NULL, 16);
+    if ((v = field(line, "si"))) r->sint_slots = (uint32_t)strtoul(v, NULL, 16);
     return r->vs && r->fs;
 }
 
