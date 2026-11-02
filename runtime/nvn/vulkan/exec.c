@@ -3889,14 +3889,20 @@ static void bind_note(int kind, uint64_t addr, uint64_t size) {
 // vc_mark_sbufs) takes sbufs(stage); st.sbuf itself keeps the game's bindings (rehashed next frame).
 static void snap_apply(int stage, uint32_t read_mask) {
     bool on = snap_on();
-    for (int i = 0; i < 16; i++)
-        if (st.sbuf[stage][i].addr && ((read_mask >> i) & 1)) bind_note(stage == 5 ? 3 : 2, st.sbuf[stage][i].addr, st.sbuf[stage][i].size);
+    // Only the low 16 bits name slots. Walk them in ascending order, as before (notes first, then snapshots): most
+    // graphics stages read none or one, not all 16. The full table copy stays: sbufs readers also see unread bindings.
+    uint32_t slots = read_mask & 0xFFFF;
+    for (uint32_t m = slots; m; m &= m - 1) {
+        int i = __builtin_ctz(m);
+        if (st.sbuf[stage][i].addr) bind_note(stage == 5 ? 3 : 2, st.sbuf[stage][i].addr, st.sbuf[stage][i].size);
+    }
     if (!on) { sb_eff_on = false; return; }
     sb_eff_on = true;
     memcpy(sb_eff[stage], st.sbuf[stage], sizeof sb_eff[stage]);
-    for (int i = 0; i < 16; i++) {
+    for (uint32_t m = slots; m; m &= m - 1) {
+        int i = __builtin_ctz(m);
         Range *r = &sb_eff[stage][i];
-        if (r->addr && ((read_mask >> i) & 1)) r->addr = snap_storage(r->addr, r->size, stage == 5);
+        if (r->addr) r->addr = snap_storage(r->addr, r->size, stage == 5);
     }
 }
 
