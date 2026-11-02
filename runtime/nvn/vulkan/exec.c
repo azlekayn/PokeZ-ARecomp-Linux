@@ -168,11 +168,34 @@ static void ir_note(uint64_t pa, const uint32_t *p, uint64_t vs) {
     ir_ring[i].seq = submit_seq + 1; ir_ring[i].pa = pa; ir_ring[i].vs = vs;
     memcpy(ir_ring[i].rec, p, sizeof ir_ring[i].rec);
 }
+// What each of the last submissions held - always on, a few counters: a device lost gave nothing to go on when the GPU
+// had no fault report and no indirect draws in flight (#108 #112: "GPU done up to submission 0: 0 of the last 0").
+#define SUBR_N 32
+typedef struct { uint64_t seq, ms, draws, passes, dispatches, vs, fs, cs; uint32_t w, h, ncolor, color0, depth; } SubRec;
+static SubRec subr[SUBR_N], subr_now;
+static uint64_t subr_n;
+void vk_builds_log(void);
+static void lost_report(uint64_t done) {
+    static bool once;
+    if (once) return;
+    once = true;
+    LOG("[vk] last submissions (the GPU finished up to %llu):\n", (unsigned long long)done);
+    for (uint64_t k = subr_n > SUBR_N ? subr_n - SUBR_N : 0; k < subr_n; k++) {
+        const SubRec *e = &subr[k % SUBR_N];
+        LOG("[vk]   %llu%s t=%llu ms: %llu draws, %llu passes, %llu dispatches; last vs %llx fs %llx cs %llx; last pass %ux%u, %u colour (format %u), depth %u\n",
+            (unsigned long long)e->seq, e->seq > done ? " (unfinished)" : "", (unsigned long long)e->ms, (unsigned long long)e->draws,
+            (unsigned long long)e->passes, (unsigned long long)e->dispatches, (unsigned long long)e->vs, (unsigned long long)e->fs,
+            (unsigned long long)e->cs, e->w, e->h, e->ncolor, e->color0, e->depth);
+    }
+    vk_log_memory("device lost");
+    vk_builds_log();
+}
 static void ir_dump(void) {
     uint64_t done = 0;
     vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &done);  // (not VK_CHECK: the device may be lost)
     unsigned lo = ir_n > IR_N ? ir_n - IR_N : 0, n = 0;
     for (unsigned k = lo; k < ir_n; k++) n += ir_ring[k & (IR_N - 1)].seq > done;
+    lost_report(done);
     LOG("[vk] indirect draws in flight (GPU done up to submission %llu): %u of the last %u\n", (unsigned long long)done, n, ir_n - lo);
     // Shown: the submission the GPU is on, then anything with a count or instances no draw has, or that changed since it
     // was translated, then the last 16
@@ -519,6 +542,9 @@ static void dl_note(const char *fmt, ...) {
 }
 void vk_dl_note_upload(void *img, uint32_t w, uint32_t h, uint32_t lv) { dl_note("  upload %p %ux%u lv%u", img, w, h, lv); }
 void vk_devlost_dump(void) {
+    uint64_t done = 0;  // (the recorder's path comes here without ir_dump)
+    if (vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &done) != VK_SUCCESS || done > submit_seq) done = 0;
+    lost_report(done);
     if (!dl_on) return;
     LOG("[vk] last GPU operations before the device loss (oldest first):\n");
     for (unsigned i = dl_n > 64 ? dl_n - 64 : 0; i < dl_n; i++) {
@@ -613,6 +639,15 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
                         .signalSemaphoreInfoCount = signal ? 2 : 1, .pSignalSemaphoreInfos = sig,
                         .waitSemaphoreInfoCount = wait ? 1 : 0, .pWaitSemaphoreInfos = &wt};
     dl_note("submit %llu", (unsigned long long)submit_seq + 1);
+    subr_now.seq = submit_seq + 1, subr_now.ms = SDL_GetTicksNS() / 1000000;
+    subr[subr_n % SUBR_N] = subr_now;
+    subr_n++;
+    subr_now.draws = subr_now.passes = subr_now.dispatches = 0;
+    {   // (test) LARECOMP_TEST_LOST_REPORT=<submission>: what a device lost logs, without one
+        static long at = -2;
+        if (at == -2) at = ENV("LARECOMP_TEST_LOST_REPORT") ? atol(ENV("LARECOMP_TEST_LOST_REPORT")) : -1;
+        if (at > 0 && (long)subr_now.seq == at) { uint64_t d = 0; vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &d); lost_report(d); }
+    }
     rec_QueueSubmit2(&si, submit_seq + 1);  // (the recorder: in order with the commands; its vkQueueSubmit2 time is in RecStats)
     pthread_mutex_lock(&seq_lock);
     submit_seq++;
@@ -1239,6 +1274,15 @@ static void build_end(int s) {
     builds[s].what = NULL;
     pthread_mutex_unlock(&builds_lock);
 }
+// (with a [hang] dump or a lost device) what the driver is building right now: a stuck compile shows in no other line
+void vk_builds_log(void) {
+    uint64_t now = SDL_GetTicksNS();
+    pthread_mutex_lock(&builds_lock);
+    for (int s = 0; s < BUILDS_MAX; s++)
+        if (builds[s].what) LOG("[shader] building for %llu ms: %s %llx %llx\n", (unsigned long long)((now - builds[s].t0) / 1000000),
+                                builds[s].what, (unsigned long long)builds[s].c0, (unsigned long long)builds[s].c1);
+    pthread_mutex_unlock(&builds_lock);
+}
 static void builds_check(void) {
     uint64_t now = SDL_GetTicksNS();
     pthread_mutex_lock(&builds_lock);
@@ -1800,6 +1844,8 @@ static void begin_pass(void) {
     in_pass = true;
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     stat_passes++;
+    subr_now.passes++, subr_now.w = pass_w, subr_now.h = pass_h, subr_now.ncolor = pass_ncolor;
+    subr_now.color0 = (uint32_t)pass_color[0], subr_now.depth = (uint32_t)pass_depth;
 }
 
 static void pass_size(int *w, int *h) {
@@ -2926,7 +2972,8 @@ static void build_pipeline(void *arg) {
     atomic_fetch_add(&stat_compiles, 1);
     atomic_fetch_add(&builds_done, 1);
     atomic_store(&pp->state, r == VK_SUCCESS ? 1 : 2);
-    slow_build(t0, "pipeline vs/fs", k->prog->code[0], k->prog->code[1]);
+    // (a prepared program has no code address yet: its hashes, as build_begin - "0 0" in #112 said nothing)
+    slow_build(t0, "pipeline vs/fs", k->prog->code[0] ? k->prog->code[0] : k->prog->prep_vh, k->prog->code[1] ? k->prog->code[1] : k->prog->prep_fh);
 }
 
 // Dynamic vertex input (g_vk.vids): the draw's layout, as build_pipeline would bake it in
@@ -6401,6 +6448,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (cp->si->uses_gmem_store) vc_mark_sbufs(5);
     stat_dispatches++;
     ia_refresh(cb);  // (the instance counts it may have written, into the private records; under the overlap only)
+    subr_now.dispatches++, subr_now.cs = cp->code;
 }
 
 // ================================================================== draws
@@ -7424,6 +7472,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (dl_on) draw_trace(cb, ind_ok);
     stat_draws++;
     cum_draws++;
+    subr_now.draws++, subr_now.vs = pr->code[0], subr_now.fs = pr->code[1];  // (the device-lost report: code addresses - our Prog keeps no hashes)
     if (g_gpuprof_frame && gp_n) draw_gp_note();
 }
 
