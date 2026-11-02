@@ -102,6 +102,7 @@ static bool fps60_holds(void) {
 // fixed-timestep accumulator - the step is the whole vsyncs owed, the fraction kept for the frames after - so the
 // simulation tracks wall-clock time at any frame rate (and still lands exactly on 60 / 30). LARECOMP_FRAME_DT=0: the
 // game's own duration, as before.
+extern int64_t g_za_cam_ns[2], g_za_cam_ns_cur[2];  // (rt_za_cam_dt, below)
 static uint32_t za_step_n;  // (the game thread) rt_za_frame_dt's step for this frame: rt_za_frame_step hands it on
 uint64_t rt_za_frame_dt(uint64_t real_ns) {
     // (F1 > Video > Frame rate: the "frame_dt" setting, runtime/settings.c; LARECOMP_FRAME_DT is its load-time
@@ -150,6 +151,7 @@ uint64_t rt_za_frame_dt(uint64_t real_ns) {
                 (unsigned long long)real_ns, (unsigned long long)n, force >= 0 ? "forced" : "accumulated");
     }
     za_step_n = (uint32_t)n;
+    g_za_cam_ns[0] = g_za_cam_ns_cur[0], g_za_cam_ns[1] = g_za_cam_ns_cur[1], g_za_cam_ns_cur[0] = g_za_cam_ns_cur[1] = 0;
     return band[n];
 }
 
@@ -205,6 +207,23 @@ uint32_t rt_za_frame_step(uint32_t game_step, uint32_t channel) {
                                                                                                : game_step;
     za_probe_step(game_step, out);
     return out;
+}
+
+// The camera's clock (diagnostic: tools/za_patches.py CAM_DT, the orbit's and the follow's dt loads): the first
+// value each part read this frame, for za_probe.c's `track` (g_za_cam_ns: the frame before's, taken at the frame
+// clock), and the record each reads logged once and on a change.
+int64_t g_za_cam_ns[2], g_za_cam_ns_cur[2];
+uint32_t g_za_cam_sel[2];
+void rt_za_cam_dt(uint32_t which, uint32_t sel, uint64_t provider, uint64_t record, uint64_t ns) {
+    if (which > 1) return;
+    static uint64_t last_rec[2], last_prov[2];
+    if (record != last_rec[which] || provider != last_prov[which]) {
+        static int n;
+        if (n++ < 40) LOG("[cam] %s: clock selector %u, provider %#llx, record %#llx (%.3f ms)\n", which ? "follow" : "orbit",
+                          sel, (unsigned long long)provider, (unsigned long long)record, (int64_t)ns / 1e6);
+        last_rec[which] = record, last_prov[which] = provider;
+    }
+    if (!g_za_cam_ns_cur[which]) g_za_cam_ns_cur[which] = (int64_t)ns ? (int64_t)ns : 1, g_za_cam_sel[which] = sel;
 }
 
 int32_t rt_za_frame_cfg(int32_t cfg) {

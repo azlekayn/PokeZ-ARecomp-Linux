@@ -55,8 +55,30 @@ def _za_frame_step(gen, a):
             f'  /* {a:#x}: mov w2, w20 (the subsystems\' step -> the decoupled one, any frame mode) */')
 
 
+# The camera's time step (diagnostic, LARECOMP_PLAYER_PROBE's `track`): the orbit (rotation, f_7000370e20) and the
+# follow (Tracking, f_700045d5b8) each ask a clock provider ([update_context]) for the record their component's
+# selector (+0x124) names and read its signed nanoseconds at +8 (opencode/camera-clock-re.md). The load is kept as
+# it is; runtime/hle/framepace.c rt_za_cam_dt is told which camera part, the selector, the record and the value -
+# whether the camera's clock takes the frame step's catch-up as the channels do (walking while turning the camera
+# juddered below 60 fps, either alone didn't). 2.0.2 only.
+CAM_DT = {'b1f12fd919eae86a': ((0x7000370e70, 19, 0), (0x700045d5fc, 20, 1))}
+
+
+def _za_cam_dt(sel_reg, which):
+    def f(gen, a):
+        w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+        assert w == 0xfd400400, hex(w)  # ldr d0, [x0, #8]
+        return ('{ extern void rt_za_cam_dt(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t); '
+                'uint64_t ea_ = c->x[0] + 0x8ull; c->v[0] = LD64(ea_); '
+                f'rt_za_cam_dt({which}u, LD32(c->x[{sel_reg}] + 0x124ull), LD64(c->x[21]), c->x[0], LD64(ea_)); }}'
+                f'  /* {a:#x}: ldr d0, [x0, #8] (the camera\'s clock record, {"orbit" if which == 0 else "follow"}) */')
+    return f
+
+
 def za_patches(build):
     out = {ZA_BUILDS[build]: _za_frame_cfg}
+    for a, reg, which in CAM_DT.get(build, ()):
+        out[a] = _za_cam_dt(reg, which)
     if build in FRAME_DT:
         out[FRAME_DT[build]] = _za_frame_dt
     if build in FRAME_STEP:

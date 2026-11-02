@@ -170,6 +170,8 @@ static void track_frame(uint32_t calls) {
         for (uint32_t i = 0; i < trk[t].n; i++) fprintf(trk_f, " %.4f", v[i]);
         if (t + 1 < ntrk) fputs(" ;", trk_f);
     }
+    extern int64_t g_za_cam_ns[2];  // (framepace.c: the camera's dt, orbit / follow, the frame before; 0: not read)
+    fprintf(trk_f, " | cam %.2f %.2f", g_za_cam_ns[0] / 1e6, g_za_cam_ns[1] / 1e6);
     fputc('\n', trk_f);
     if (!--trk_left) { fclose(trk_f), trk_f = NULL; LOG("[player] track done\n"); }
 }
