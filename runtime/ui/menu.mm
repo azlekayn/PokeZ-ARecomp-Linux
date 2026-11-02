@@ -29,6 +29,8 @@ extern "C" void vk_overlay_end(void *window_cmd, void *cmd);
 extern "C" int vk_hdr_state(void);  // device.c: 0 the display isn't in HDR mode, 1 it is, 2 HDR output on
 extern "C" float vk_fg_present_rate(void);  // device.c: generated frames actually landing on screen per second (0: off / none recently)
 #endif
+extern "C" const char *rt_version(void);      // runtime/ui/launcher.mm
+extern "C" const char *rt_build_label(void);  // runtime/build_info.c (the menu header's "b<N> <commit>")
 
 extern "C" {
 #include "../hle.h"
@@ -1417,12 +1419,17 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::PushFont(g_font_big);
         ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s", TR("Settings", "Configurações"));
         ImGui::PopFont();
+        {   // which build this is (runtime/build_info.c: "b<N> <commit>"), small and muted beside the title
+            ImGui::SameLine();
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ImGui::GetFontSize() * 0.45f);
+            ImGui::TextDisabled("%s  %s", rt_version(), rt_build_label());
+        }
         {
             float bx = 44 * scale;
             ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bx);
             ImVec2 p = ImGui::GetCursorScreenPos();
             ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
-            bool close = ImGui::InvisibleButton("##close", ImVec2(bx, bx), ImGuiButtonFlags_EnableNav);
+            bool close = ui_invisible_button("##close", ImVec2(bx, bx), ImGuiButtonFlags_EnableNav);
             ImGui::PopStyleColor();
             bool hot = ImGui::IsItemHovered() || ImGui::IsItemFocused();
             ImU32 col = hot ? IM_COL32(242, 181, 68, 255) : IM_COL32(194, 209, 219, 255);

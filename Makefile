@@ -153,6 +153,12 @@ $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"' -DGAMELIB_BASE_ID
                                 -DGAMELIB_CFLAGS='"$(strip $(filter-out -Iruntime,$(GENFLAGS)))"' \
                                 -DGAMELIB_SHARED='"$(GAMELIB_SHARED)"'
 
+# the build's label (runtime/build_info.c): package.sh passes "b<N> <commit>"; a plain make, the commit alone
+BUILD_LABEL ?= $(shell c=$$(git rev-parse --short=7 HEAD 2>/dev/null) && echo "$$c$$(git diff --quiet HEAD 2>/dev/null || echo +)")
+$(B)/rt/build_info.o: FORCE
+$(B)/rt/build_info.o: RTFLAGS += -DLARECOMP_BUILD='"$(or $(BUILD_LABEL),dev)"'
+FORCE:
+
 $(B)/rt/%.o: runtime/%.c $(RT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(RTFLAGS) -c $< -o $@
@@ -366,7 +372,7 @@ appimages:
 smoketest:
 	tools/linux/smoketest.sh
 
-.PHONY: dmg all gen gen-helper gen-objs runtime-objs deps deps-windows app dist rando-helper appimage appimages smoketest
+.PHONY: FORCE dmg all gen gen-helper gen-objs runtime-objs deps deps-windows app dist rando-helper appimage appimages smoketest
 
 build/test_shaders: tools/test_shaders.m runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
 	clang -O1 -fobjc-arc -framework Metal -framework Foundation -o $@ tools/test_shaders.m runtime/nvn/maxwell/translate.c

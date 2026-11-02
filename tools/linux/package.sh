@@ -17,7 +17,8 @@ P=$L/deps
 B=$L/game
 APPDIR=$L/AppDir
 VERSION=$(sed -n 's/^#define LARECOMP_VERSION "\(.*\)"/\1/p' runtime/ui/launcher.mm)
-BUILD=$(git rev-list --count HEAD 2>/dev/null || echo "?")
+BUILD=${ZA_BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo "?")}  # (ZA_BUILD=<n>: a test build's own number)
+COMMIT=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "?")$(git diff --quiet HEAD 2>/dev/null || echo +)
 OUT="build/dist/ZA Recomp-$VERSION-b$BUILD-linux-$ARCH.AppImage"
 JOBS=$(nproc)
 
@@ -33,7 +34,7 @@ else
 fi
 
 # the app alone (the game code is built on the player's machine)
-make -j"$JOBS" B="$B" DEPS="$P" SHADERC=-lshaderc_shared "${MAKEARGS[@]}" "$B/lasrecomp"
+make -j"$JOBS" B="$B" DEPS="$P" SHADERC=-lshaderc_shared BUILD_LABEL="b$BUILD $COMMIT" "${MAKEARGS[@]}" "$B/lasrecomp"
 if nm "$B/lasrecomp" | grep ' f_70' >/dev/null; then echo "$B/lasrecomp has game code linked in"; exit 1; fi
 ZIG_TARGET=$ARCH-linux tools/fetch_zig.sh
 

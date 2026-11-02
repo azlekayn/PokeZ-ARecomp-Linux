@@ -18,7 +18,8 @@ image() {  # arch -> tag (built once, then cached by podman)
 }
 run() {  # image, command...: the checkout mounted at /src
     local img=$1; shift
-    podman run --rm --arch "${img##*:}" -v "$PWD:/src" -w /src -e SYSROOT=/src/build/linux/aarch64/sysroot "$img" "$@"
+    podman run --rm --arch "${img##*:}" -v "$PWD:/src" -w /src -e SYSROOT=/src/build/linux/aarch64/sysroot \
+        -e ZA_BUILD="${ZA_BUILD:-}" "$img" "$@"  # (ZA_BUILD=<n>: the AppImage's build number, package.sh)
 }
 
 if [ "$ARCH" = "$(uname -m)" ]; then  # native: one container of this arch does it all

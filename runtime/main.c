@@ -57,6 +57,7 @@ static void cpu_name(char *buf, size_t size) {
 }
 static void log_system(void) {
     extern const char *rt_version(void);  // runtime/ui/launcher.mm
+    extern const char *rt_build_label(void);  // runtime/build_info.c
     char cpu[128], os[160];
     cpu_name(cpu, sizeof cpu);
     plat_os_name(os, sizeof os);
@@ -66,7 +67,7 @@ static void log_system(void) {
              __builtin_cpu_supports("avx2") ? "yes" : "no", __builtin_cpu_supports("fma") ? "yes" : "no",
              __builtin_cpu_supports("bmi2") ? "yes" : "no", gamelib_old_cpu() ? "v2" : "v3");
 #endif
-    LOG("[system] ZA Recomp %s | %s | CPU: %s (%d threads%s) | RAM %d GB\n", rt_version(), os, cpu,
+    LOG("[system] ZA Recomp %s (%s) | %s | CPU: %s (%d threads%s) | RAM %d GB\n", rt_version(), rt_build_label(), os, cpu,
         SDL_GetNumLogicalCPUCores(), feat, (SDL_GetSystemRAM() + 512) / 1024);
 #ifdef _WIN32
     plat_run_begin();
