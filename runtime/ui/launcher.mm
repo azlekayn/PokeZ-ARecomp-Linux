@@ -766,8 +766,39 @@ static void find_save(const std::string &dir, int depth, std::string &best, time
     for (auto &s : sub) find_save(s, depth + 1, best, best_t);
 }
 
+// An archive's links and special files, removed right after it is opened (save/.import, mods/.install): bsdtar and GNU
+// tar refuse to write through a link by default, but a link left in the tree - "romfs -> /home/<you>", "a -> .." -
+// would be followed afterwards by the copy below (another folder's files copied in, or no end to a loop) and by the
+// game's own reads of a mod. Only plain files and folders are kept. (Windows' tar makes no links without admin rights;
+// lstat there doesn't tell junctions apart, so it is left as it was.)
+static void strip_links(const std::string &dir, int depth = 0) {
+#ifndef _WIN32
+    if (depth > 32) return;
+    DIR *d = opendir(dir.c_str());
+    if (!d) return;
+    std::vector<std::string> sub;
+    while (struct dirent *e = readdir(d)) {
+        std::string n = e->d_name;
+        if (n == "." || n == "..") continue;
+        std::string p = dir + "/" + n;
+        struct stat st;
+        if (lstat(p.c_str(), &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) sub.push_back(p);
+        else if (!S_ISREG(st.st_mode)) {
+            fprintf(stderr, "[launcher] %s: not a plain file (a link or a device), removed\n", p.c_str());
+            unlink(p.c_str());
+        }
+    }
+    closedir(d);
+    for (auto &s : sub) strip_links(s, depth + 1);
+#else
+    (void)dir, (void)depth;
+#endif
+}
+
 // plain copies (never links: the game writes its save in place, the backup it came from stays as it was)
-static bool copy_save_tree(const std::string &src, const std::string &dst) {
+static bool copy_save_tree(const std::string &src, const std::string &dst, int depth = 0) {
+    if (depth > 32) return false;  // (a folder linked into itself: stop instead of copying forever)
     mkdir(dst.c_str(), 0755);
     DIR *d = opendir(src.c_str());
     if (!d) return false;
@@ -776,7 +807,11 @@ static bool copy_save_tree(const std::string &src, const std::string &dst) {
         std::string n = e->d_name;
         if (n == "." || n == "..") continue;
         std::string a = src + "/" + n, b = dst + "/" + n;
-        if (is_dir(a)) { ok &= copy_save_tree(a, b); continue; }
+#ifndef _WIN32
+        struct stat lst;  // (a link inside the picked folder is skipped, not followed: see strip_links)
+        if (lstat(a.c_str(), &lst) != 0 || (!S_ISDIR(lst.st_mode) && !S_ISREG(lst.st_mode))) continue;
+#endif
+        if (is_dir(a)) { ok &= copy_save_tree(a, b, depth + 1); continue; }
         FILE *in = fopen(a.c_str(), "rb"), *out = in ? fopen(b.c_str(), "wb") : NULL;
         if (in && out) {
             char buf[65536];
@@ -815,6 +850,7 @@ static void import_save() {
             return;
         }
         remove(log.c_str());
+        strip_links(tmp);
     }
     std::string from;
     time_t t = 0;
@@ -1090,6 +1126,7 @@ static void *mod_install_thread(void *) {
             goto done;
         }
         remove(log.c_str());
+        strip_links(tmp);
         base = tmp;
     }
     {
