@@ -104,6 +104,7 @@ static bool fps60_holds(void) {
 // game's own duration, as before.
 extern int64_t g_za_cam_ns[2], g_za_cam_ns_cur[2];  // (rt_za_cam_dt, below)
 static uint32_t za_step_n;  // (the game thread) rt_za_frame_dt's step for this frame: rt_za_frame_step hands it on
+extern bool g_za_dyn30, g_za_dyn30_prev;  // (rt_za_frame_cfg, below)
 uint64_t rt_za_frame_dt(uint64_t real_ns) {
     // (F1 > Video > Frame rate: the "frame_dt" setting, runtime/settings.c; LARECOMP_FRAME_DT is its load-time
     // override.)
@@ -205,6 +206,15 @@ uint32_t rt_za_frame_step(uint32_t game_step, uint32_t channel) {
     uint32_t out = !on || !g_settings.frame_dt || (game_step == 0 && keeps_game_step(channel)) ? game_step
                  : za_step_n > game_step                                                       ? za_step_n
                                                                                                : game_step;
+    // The per-frame mode (rt_za_frame_cfg) brought the roll-over-a-ledge stuck back (Steam Deck, 2026-11-03): the
+    // player's code takes the game's frame mode a frame late, so the first frame run in the 30 fps mode after a 60 fps
+    // one handed channel 0 two ticks while that code still went by the 60 fps mode - the mismatch above. That frame
+    // keeps channel 0 on one tick (default, =2). Tested on the Deck: never stuck, the banners still clear; with the
+    // per-frame mode off (LARECOMP_FRAME_MODE_DYN=0) never stuck either. LARECOMP_DYN_CH0=0: two ticks there (stuck
+    // again); =1: one tick on every frame in the 30 fps mode
+    static int ch0 = -1;
+    if (ch0 < 0) ch0 = ENV("LARECOMP_DYN_CH0") ? atoi(ENV("LARECOMP_DYN_CH0")) : 2;
+    if (channel == 0 && g_za_dyn30 && ((ch0 == 1) || (ch0 == 2 && !g_za_dyn30_prev))) out = 0;
     za_probe_step(game_step, out);
     return out;
 }
@@ -239,6 +249,7 @@ void rt_za_cam_dt(uint32_t which, uint32_t sel, uint64_t provider, uint64_t reco
 // the judder that remains below 60 is the world moving in whole 1/60 s ticks - 1.28 a frame at 47 fps can only be
 // 1, 1, 1, 2 - and goes as the frame rate nears 60. (Smooth alternatives: the game's own 30 fps mode, or slow motion.)
 bool g_za_mode_dyn, g_za_mode_dyn_interval;
+bool g_za_dyn30, g_za_dyn30_prev;  // (this frame / the one before ran in the game's 30 fps mode: rt_za_frame_step)
 int32_t rt_za_frame_cfg(int32_t cfg) {
     g_za_frame_hook = true;
     const char *e = ENV("LARECOMP_FPS");
@@ -255,7 +266,9 @@ int32_t rt_za_frame_cfg(int32_t cfg) {
                                                     : "60 fps, its 30 fps mode on frames that are behind")
                           : on ? "60 fps" : "as is");
     }
-    if (g_za_mode_dyn && za_step_n >= 1) {
+    bool behind = g_za_mode_dyn && za_step_n >= 1;
+    g_za_dyn30_prev = g_za_dyn30, g_za_dyn30 = behind;
+    if (behind) {
         static uint64_t n30;
         if (++n30 % 600 == 1) LOG("[pace] frames in the game's 30 fps mode (behind): %llu so far\n", (unsigned long long)n30);
         return cfg;
