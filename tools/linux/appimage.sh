@@ -18,7 +18,9 @@ image() {  # arch -> tag (built once, then cached by podman)
 }
 run() {  # image, command...: the checkout mounted at /src
     local img=$1; shift
-    podman run --rm --arch "${img##*:}" -v "$PWD:/src" -w /src -e SYSROOT=/src/build/linux/aarch64/sysroot \
+    # PODMAN_OPTS: extra podman run options - "--security-opt label=disable" where SELinux refuses the checkout's
+    # files to the container (a drive whose files are unlabeled_t: "exec ... Permission denied")
+    podman run --rm --arch "${img##*:}" ${PODMAN_OPTS:-} -v "$PWD:/src" -w /src -e SYSROOT=/src/build/linux/aarch64/sysroot \
         -e ZA_BUILD="${ZA_BUILD:-}" "$img" "$@"  # (ZA_BUILD=<n>: the AppImage's build number, package.sh)
 }
 
