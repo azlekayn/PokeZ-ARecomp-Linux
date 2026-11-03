@@ -248,7 +248,21 @@ static void rom_dir_path(const uint8_t *dmeta, uint32_t dsize, uint32_t dir, cha
 static char layer_root[16][1100];
 static int nlayers = -1;
 static bool trinity;  // the RomFS has arc/data.trpfd
-RT_ON_RESET(layer_reset) { nlayers = -1; trinity = false; }
+static char layer_names[1100];  // the mods this boot layered, '|' between (the F1 menu's Mods tab: fs_mods_loaded)
+static pthread_mutex_t layer_names_lock = PTHREAD_MUTEX_INITIALIZER;
+RT_ON_RESET(layer_reset) {
+    nlayers = -1; trinity = false;
+    pthread_mutex_lock(&layer_names_lock);
+    layer_names[0] = 0;
+    pthread_mutex_unlock(&layer_names_lock);
+}
+// Was mods/<name> layered by this boot (any thread; false before the game opened its RomFS)
+bool fs_mod_loaded(const char *name) {
+    pthread_mutex_lock(&layer_names_lock);
+    bool r = settings_list_has(layer_names, name);
+    pthread_mutex_unlock(&layer_names_lock);
+    return r;
+}
 
 static int name_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
 // mods_order's place (unlisted: after every listed one), then the name
@@ -288,10 +302,14 @@ static void layer_init(void) {
     }
     closedir(d);
     qsort(names, n, sizeof *names, mod_cmp);
+    pthread_mutex_lock(&layer_names_lock);
     for (int i = 0; i < n; i++) {
         snprintf(layer_root[nlayers++], sizeof *layer_root, "mods/%s/romfs", names[i]);
         LOG("[fs] mod: %s\n", names[i]);
+        if (layer_names[0]) strlcat(layer_names, "|", sizeof layer_names);
+        strlcat(layer_names, names[i], sizeof layer_names);
     }
+    pthread_mutex_unlock(&layer_names_lock);
 }
 
 static bool layer_file(const char *path, char *out, size_t cap) {
@@ -714,6 +732,8 @@ static ssize_t romfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
                 }
                 extern void enemy_random_filter(const char *host, uint64_t off, uint8_t *dst, uint64_t n);
                 if (r > 0) enemy_random_filter(ov[i].path, in, dst + done, (uint64_t)r);  // (enemy mode Random)
+                extern void za_royale_filter(const char *host, uint64_t off, uint8_t *dst, uint64_t n);
+                if (r > 0) za_royale_filter(ov[i].path, in, dst + done, (uint64_t)r);  // (Pokémon Z-A: royale_random.c)
             }
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);

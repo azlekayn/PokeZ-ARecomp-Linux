@@ -8,6 +8,9 @@
 #include <SDL3/SDL.h>
 #include <math.h>
 #include <pthread.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <algorithm>
 #include <atomic>
 #include <string>
 #include <vector>
@@ -889,6 +892,108 @@ static void tab_quit(float scale, bool in_game) {
     opt_end();
 }
 
+// Pokémon Z-A's Mods page: each installed mod (mods/<name>/romfs, runtime/services/fs.c) on or off, and the Royale
+// randomizer. The game layers its mods once, when it opens its files, so a change here applies from the next game start:
+// the page says which ones differ from what this boot loaded and offers the way back through the start screen (an
+// in-place game reboot isn't used for Pokémon Z-A). Order and installing stay on the start screen's Mods page.
+// (mods_off: settings.h; a folder starting with '.' or '_' is never listed, as fs.c skips it)
+extern "C" bool fs_mod_loaded(const char *name);  // runtime/services/fs.c
+static void tab_mods(float scale, bool in_game) {
+    static std::vector<std::string> names;
+    static std::vector<char> has_table;  // (the mod holds the unpacked trainer table: royale_random.c can roll it)
+    static int scanned = -1000;
+    if (ImGui::GetFrameCount() - scanned > 60) {  // (once a second: a mod installed meanwhile shows up)
+        scanned = ImGui::GetFrameCount();
+        names.clear(), has_table.clear();
+        if (DIR *d = opendir("mods")) {
+            while (struct dirent *e = readdir(d)) {
+                if (e->d_name[0] == '.' || e->d_name[0] == '_') continue;
+                struct stat st;
+                std::string r = std::string("mods/") + e->d_name + "/romfs";
+                if (stat(r.c_str(), &st) || !S_ISDIR(st.st_mode)) continue;
+                names.push_back(e->d_name);
+            }
+            closedir(d);
+        }
+        std::sort(names.begin(), names.end());
+        for (auto &n : names) {
+            struct stat st;
+            has_table.push_back(!stat(("mods/" + n + "/romfs/world/ik_data/trainer/trdata/trdata_array.bin").c_str(), &st));
+        }
+    }
+    opt_begin("##mods", scale);
+    opt_section(TR("Installed mods", "Mods instalados"));
+    int pending = 0;
+    bool table_on = false;
+    if (names.empty())
+        ImGui::TextDisabled("%s", TR("No mods installed. Add them on the start screen's Mods page (a .zip, .rar or .7z), "
+                                     "or put them in mods/<name>/romfs.",
+                                     "Nenhum mod instalado. Adicione na página Mods da tela inicial (um .zip, .rar ou .7z), "
+                                     "ou coloque em mods/<nome>/romfs."));
+    for (size_t i = 0; i < names.size(); i++) {
+        const char *n = names[i].c_str();
+        bool on = !settings_list_has(g_settings.mods_off, n), was = on;
+        bool differs = in_game && on != fs_mod_loaded(n);
+        pending += differs;
+        table_on |= on && has_table[i];
+        char desc[400];
+        snprintf(desc, sizeof desc, "%s%s", differs ? (on ? TR("Turned on: loads from the next game start. ", "Ligado: carrega a partir do próximo início do jogo. ")
+                                                           : TR("Turned off: still loaded until the next game start. ", "Desligado: segue carregado até o próximo início do jogo. "))
+                                                    : "",
+                 has_table[i] ? TR("Holds the game's trainer table: the Royale randomizer below rolls it.",
+                                   "Contém a tabela de treinadores do jogo: o aleatorizador da Royale abaixo a sorteia.")
+                              : TR("Files in mods/<name>/romfs replace the game's.", "Os arquivos em mods/<nome>/romfs substituem os do jogo."));
+        if (opt_toggle(n, &on, true, desc) && on != was) {
+            std::string off;
+            for (auto &m : names) {
+                bool mo = &m == &names[i] ? on : !settings_list_has(g_settings.mods_off, m.c_str());
+                if (!mo) off += (off.empty() ? "" : "|") + m;
+            }
+            // (folders no longer in mods/ keep their entry: harmless, and the start screen tidies the list)
+            snprintf(g_settings.mods_off, sizeof g_settings.mods_off, "%s", off.c_str());
+            settings_save();
+        }
+    }
+    if (pending) {
+        char lbl[120];
+        snprintf(lbl, sizeof lbl, TR("Apply %d change(s): back to the start screen", "Aplicar %d mudança(s): voltar à tela inicial"), pending);
+        if (opt_action(lbl, "", TR("Leaves the game for the start screen; press Play there to start it with the mods as set "
+                                   "here.\n\nProgress since your last save is lost.",
+                                   "Sai do jogo para a tela inicial; aperte Jogar lá para começar com os mods como estão "
+                                   "aqui.\n\nO progresso desde o último save se perde."))) {
+            settings_save();
+            rt_request_reboot(2);
+            set_open(false);
+        }
+    }
+    opt_section(TR("Built in", "Embutidos"));
+    // (runtime/hle/royale_random.c: rolls the mod's table at each load of it - takes effect from the next load)
+    char rdesc[700];
+    snprintf(rdesc, sizeof rdesc, "%s%s",
+             TR("The night Z-A Royale's Battle Zone trainers get new teams each time the game loads its trainer table: random "
+                "species and natures, levels within a range of each trainer's own. Who they are and where they stand don't "
+                "change, nor does any other trainer.",
+                "Os treinadores da Zona de Batalha da Royale Z-A noturna ganham times novos sempre que o jogo carrega a tabela "
+                "de treinadores: espécies e naturezas aleatórias, níveis numa faixa do próprio treinador. Quem são e onde ficam "
+                "não muda, nem os outros treinadores."),
+             table_on ? "" : TR("\n\nNeeds a mod holding the game's own trainer table, unpacked (tools/za/trdata_extract.py "
+                                "makes it from your game files): none is on.",
+                                "\n\nPrecisa de um mod com a própria tabela de treinadores do jogo, descompactada "
+                                "(tools/za/trdata_extract.py a faz dos seus arquivos): nenhum está ligado."));
+    if (opt_toggle(TR("Z-A Royale randomizer", "Aleatorizador da Royale Z-A"), &g_settings.za_royale_random, false, rdesc))
+        settings_save();
+    if (g_settings.za_royale_random) {
+        float d = (float)g_settings.za_royale_delta;
+        if (opt_slider(TR("Royale level range", "Faixa de nível da Royale"), &d, 0, 20, 1, 5, "+/-%g",
+                       TR("How far a rolled Pokémon's level may stray from its trainer's own levels.",
+                          "O quanto o nível de um Pokémon sorteado pode variar dos níveis do próprio treinador."))) {
+            g_settings.za_royale_delta = (int)d;
+            settings_save();
+        }
+    }
+    opt_end();
+}
+
 // Pokémon Z-A's Game page: its text language, and how to reach this menu
 static void tab_game(void) {
     opt_begin("##game", ImGui::GetFontSize() / 34);
@@ -1083,9 +1188,9 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     if (prelaunch) tabs[ntabs++] = {TR("Files", "Arquivos"), -1, true};
     if (!menu_la_tabs) {
         const char *names[] = {TR("Controls", "Controles"), TR("Video", "Vídeo"), TR("Audio", "Áudio"), TR("Game", "Jogo"),
-                               TR("Quit", "Sair")};
-        static const int ids[] = {8, 0, 1, 10, 9};
-        for (int i = 0; i < 5; i++)
+                               "Mods", TR("Quit", "Sair")};
+        static const int ids[] = {8, 0, 1, 10, 11, 9};
+        for (int i = 0; i < 6; i++)
             if (ids[i] != 9 || !prelaunch) tabs[ntabs++] = {names[i], ids[i], true};
     } else {
         static const char *names[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Gameplay",
@@ -1210,6 +1315,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 case 8: controls_tab_draw(scale); break;
                 case 9: tab_quit(scale, in_game); break;
                 case 10: tab_game(); break;
+                case 11: tab_mods(scale, in_game); break;
                 }
                 static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
                 if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));

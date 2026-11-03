@@ -112,6 +112,9 @@ typedef struct {
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
     char rando_options[48];  // the Randomizer tab's New seed options: a seed ID without its random part (empty = defaults)
     bool fps60_lock;  // with fps60: stays at 60 even when this PC can't hold it (slow motion below; runtime/hle/framepace.c)
+    bool za_royale_random;  // Pokémon Z-A: re-roll the night Z-A Royale trainers each load, so every night differs
+                            // (runtime/hle/royale_random.c; needs the unpacked trainer table as a mod). Off by default.
+    int za_royale_delta;    // its level +/- around each trainer's own level (default 5)
     bool frame_dt;    // Pokémon Z-A: the world's step from a fixed-timestep accumulator (runtime/hle/framepace.c
                       // rt_za_frame_dt) - the same game speed at any frame rate. Off: the game's own step (slow motion
                       // below 60 fps). On by default.
