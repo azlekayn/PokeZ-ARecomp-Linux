@@ -233,20 +233,25 @@ void rt_za_cam_dt(uint32_t which, uint32_t sel, uint64_t provider, uint64_t reco
 // Victory banner cut off without its fade (Steam Deck at ~47 fps, 2026-11-02: channel 1 by bisect; the game's own 30 fps
 // mode, two ticks on every channel, showed both right). In its 30 fps mode the game hands every channel max(1, the
 // step) itself, as it does on the Switch. Its present interval of 2 for those frames is held at 1 (g_za_mode_dyn:
-// objects.c present_pace) - our accumulator, not the interval, keeps the speed.
-bool g_za_mode_dyn;
+// objects.c present_pace) - our accumulator, not the interval, keeps the speed. =2 keeps the game's interval instead:
+// a frame that moved the world two ticks stays on screen two vsyncs (the camera judder test: with =1 the world moves
+// 1, 1, 1, 2 ticks a frame while every frame shows ~21 ms at 47 fps).
+bool g_za_mode_dyn, g_za_mode_dyn_interval;
 int32_t rt_za_frame_cfg(int32_t cfg) {
     g_za_frame_hook = true;
     const char *e = ENV("LARECOMP_FPS");
     bool on = e ? atoi(e) >= 60 : fps60_holds();
     static int dyn = -1;
-    if (dyn < 0) dyn = ENV("LARECOMP_FRAME_MODE_DYN") && atoi(ENV("LARECOMP_FRAME_MODE_DYN")) != 0;
+    if (dyn < 0) dyn = ENV("LARECOMP_FRAME_MODE_DYN") ? atoi(ENV("LARECOMP_FRAME_MODE_DYN")) : 0;
     g_za_mode_dyn = dyn && on && g_settings.frame_dt && cfg > 0;
+    g_za_mode_dyn_interval = g_za_mode_dyn && dyn == 2;
     static int logged = -1;
     if (logged != (int)on + 2 * g_za_mode_dyn) {
         logged = (int)on + 2 * g_za_mode_dyn;
         LOG("[pace] game frame mode %d -> %d (%s)\n", cfg, on ? 0 : cfg,
-            g_za_mode_dyn ? "60 fps, its 30 fps mode on frames that are behind" : on ? "60 fps" : "as is");
+            g_za_mode_dyn ? (g_za_mode_dyn_interval ? "60 fps, its 30 fps mode and interval on frames that are behind"
+                                                    : "60 fps, its 30 fps mode on frames that are behind")
+                          : on ? "60 fps" : "as is");
     }
     if (g_za_mode_dyn && za_step_n >= 1) {
         static uint64_t n30;
