@@ -523,6 +523,7 @@ static VkQueryPool gp_qp;
 static int gp_n;
 static char gp_label[512][112];
 static uint32_t gp_draws[512];
+static uint32_t gp_pass_draws;  // (the draws of the pass so far: the first few each get a row, draw_gp_note)
 // LARECOMP_VK_DEVLOST_TRACE=1: the last 64 GPU operations, dumped on device loss (with LARECOMP_SYNC_SUBMIT=1 the
 // dump ends with the command list that faulted).
 #define DL_N 4096  // (a power of two)
@@ -587,6 +588,7 @@ static void gp_mark(VkCommandBuffer cb, const char *fmt, ...) {
     vsnprintf(gp_label[gp_n], sizeof gp_label[0], fmt, ap);
     va_end(ap);
     gp_draws[gp_n] = 0;
+    if (!strncmp(fmt, "pass:", 5)) gp_pass_draws = 0;
     gp_n++;
 }
 void renderer_flush(void);
@@ -1574,6 +1576,7 @@ static void vk_end_pass_at(int line) {
     if (prof && line < 4096) prof_end_line[line]++;
     rec_CmdEndRendering(vk_cmd());
     in_pass = false;
+    if (g_gpuprof_frame) gp_mark(vk_cmd(), "  (pass end: its stores, and what comes before the next mark)");
     if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
@@ -2046,6 +2049,17 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
     VkCommandBuffer cb = vk_cmd();
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     VkRect2D rect = scissor_rect();
+    {   // (debug) LARECOMP_LOG_CLEAR_RECT=1: one frame in 600, each clear's rect against the pass and the game's viewport.
+        // Z-A draws 1280x720 into 1920x1080 targets in handheld mode: a clear whose rect is the whole pass while the
+        // viewport is the smaller area clears ~2.25x the pixels the frame uses (the no-draw G-buffer pass, ~2.6 ms on the Deck)
+        static int on = -1;
+        if (on < 0) on = ENV("LARECOMP_LOG_CLEAR_RECT") != NULL;
+        if (on && renderer_present_count() % 600 == 1)
+            LOG("[clearrect] frame %llu idx %d d%d s%d pass %ux%u ncolor %u rect %d,%d %ux%u vp %.0f %.0f %.0f %.0f sc %d %d %d %d\n",
+                (unsigned long long)renderer_present_count(), index, depth, stencil, pass_w, pass_h, pass_ncolor, rect.offset.x,
+                rect.offset.y, rect.extent.width, rect.extent.height, st.viewport[0][0], st.viewport[0][1], st.viewport[0][2],
+                st.viewport[0][3], st.scissor[0][0], st.scissor[0][1], st.scissor[0][2], st.scissor[0][3]);
+    }
     if (!rect.extent.width || !rect.extent.height) return;
     if (index >= 0 && (index >= (int)pass_ncolor || pass_color[index] == VK_FORMAT_UNDEFINED)) return;
     bool simple = (index < 0 || (mask & 0xF) == 0xF) && (!stencil || (smask & 0xFF) == 0xFF);
@@ -2059,6 +2073,9 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
         }
         VkImageAspectFlags dsa = (depth && pass_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | (stencil && pass_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
         if (dsa) a[n++] = (VkClearAttachment){.aspectMask = dsa, .clearValue.depthStencil = {dval, sval}};
+        if (g_gpuprof_frame && n)
+            gp_mark(cb, "clear idx %d%s%s %ux%u of %ux%u", index, dsa & VK_IMAGE_ASPECT_DEPTH_BIT ? " depth" : "",
+                    dsa & VK_IMAGE_ASPECT_STENCIL_BIT ? " stencil" : "", rect.extent.width, rect.extent.height, pass_w, pass_h);
         VkClearRect cr = {rect, 0, pass_layers};
         if (n) rec_CmdClearAttachments(cb, n, a, 1, &cr);
         return;
@@ -6886,12 +6903,14 @@ static __attribute__((cold, noinline)) void draw_trace(VkCommandBuffer cb, bool 
     }
     if (dl_on > 0) vk_checkpoint(cb, dl_n);
 }
-static __attribute__((cold, noinline)) void draw_gp_note(void) {
+static __attribute__((cold, noinline)) void draw_gp_note(void) {  // (after the draw is recorded)
     if (!gp_draws[gp_n - 1]) {  // first draw of the row: its fragment shader hash
         size_t l = strlen(gp_label[gp_n - 1]);
         snprintf(gp_label[gp_n - 1] + l, sizeof gp_label[0] - l, ", first fs %016llx", (unsigned long long)g_cur_fs_hash);
     }
     gp_draws[gp_n - 1]++;
+    // (the 2nd..8th draw of a pass each start a row: which draw of a pass of a few full-screen ones costs the time)
+    if (++gp_pass_draws < 8) gp_mark(vk_cmd(), "  draw %u of the pass", gp_pass_draws + 1);
 }
 static __attribute__((cold, noinline)) void draw_viewport_note(float vx, float vw, float k) {
     const float *vp = st.viewport[0];

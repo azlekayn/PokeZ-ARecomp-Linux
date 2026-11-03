@@ -15,6 +15,7 @@
 //   wait <frames>            replies after that many more frames (a sequence: press A, wait 60, shot)
 //   mark [<note>]            "[devtools] mark" in the log with the frame: where the bug was on screen
 //   f9                       the next frame's passes (with LARECOMP_DEBUG_FRAMES=1, as F9)
+//   gpuprof                  GPU time per pass of the next frame ("[gpuprof]" in the log, as LARECOMP_GPUPROF_AT)
 // The input goes in where LARECOMP_INPUT's does (runtime/hle/input.c script_buttons): the game sees it, the F1 menu
 // doesn't - `key` reaches the menu. Socket: LARECOMP_DEVTOOLS_SOCK, else $XDG_RUNTIME_DIR/za-devtools.sock, else
 // /tmp/za-devtools-<uid>.sock (this user only: 0600).
@@ -35,6 +36,7 @@
 
 #include "rt.h"
 
+volatile int g_gpuprof_request;  // (device.c: starts a [gpuprof] frame at the next present; every platform)
 #ifdef __linux__
 static bool g_on;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -252,7 +254,8 @@ static void command(int fd, char *c) {
         return;
     }
     if (!strcmp(c, "f9")) { g_debug_frame_request = 1; reply(fd, "ok"); return; }
-    reply(fd, "err unknown command (ping status shot hold press release key wait mark f9)");
+    if (!strcmp(c, "gpuprof")) { g_gpuprof_request = 1; reply(fd, "ok frame %llu", (unsigned long long)f); return; }
+    reply(fd, "err unknown command (ping status shot hold press release key wait mark f9 gpuprof)");
 }
 
 static void *serve(void *arg) {

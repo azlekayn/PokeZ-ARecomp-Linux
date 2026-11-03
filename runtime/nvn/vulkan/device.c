@@ -2126,6 +2126,8 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         extern bool g_gpuprof_frame;
         extern void vk_gpuprof_report(void);
         if (g_gpuprof_frame) { g_gpuprof_frame = false; vk_gpuprof_report(); }
+        extern volatile int g_gpuprof_request;  // (devtools' `gpuprof`: the next whole frame)
+        if (g_gpuprof_request) { g_gpuprof_request = 0; g_gpuprof_frame = true; }
         const char *e = getenv("LARECOMP_GPUPROF_AT");
         for (const char *p = e; p && *p;) {
             long at = strtol(p, (char **)&p, 10);
