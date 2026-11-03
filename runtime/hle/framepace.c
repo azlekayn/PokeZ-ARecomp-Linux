@@ -226,11 +226,32 @@ void rt_za_cam_dt(uint32_t which, uint32_t sel, uint64_t provider, uint64_t reco
     if (!g_za_cam_ns_cur[which]) g_za_cam_ns_cur[which] = (int64_t)ns ? (int64_t)ns : 1, g_za_cam_sel[which] = sel;
 }
 
+// (60 fps, frame_dt) LARECOMP_FRAME_MODE_DYN=1: a frame the accumulator says is behind (rt_za_frame_dt's step 1+, read
+// earlier in the same function) runs in the game's own 30 fps mode, the rest in its 60 fps mode. The per-channel
+// catch-up (rt_za_frame_step) gave channel 1 - the world's speed - two ticks while the game believed it was in its 60 fps
+// mode, and its UI timelines then never finished: the ambush's "ADVANTAGE / Now's your chance!" stayed on screen, the
+// Victory banner cut off without its fade (Steam Deck at ~47 fps, 2026-11-02: channel 1 by bisect; the game's own 30 fps
+// mode, two ticks on every channel, showed both right). In its 30 fps mode the game hands every channel max(1, the
+// step) itself, as it does on the Switch. Its present interval of 2 for those frames is held at 1 (g_za_mode_dyn:
+// objects.c present_pace) - our accumulator, not the interval, keeps the speed.
+bool g_za_mode_dyn;
 int32_t rt_za_frame_cfg(int32_t cfg) {
     g_za_frame_hook = true;
     const char *e = ENV("LARECOMP_FPS");
     bool on = e ? atoi(e) >= 60 : fps60_holds();
+    static int dyn = -1;
+    if (dyn < 0) dyn = ENV("LARECOMP_FRAME_MODE_DYN") && atoi(ENV("LARECOMP_FRAME_MODE_DYN")) != 0;
+    g_za_mode_dyn = dyn && on && g_settings.frame_dt && cfg > 0;
     static int logged = -1;
-    if (logged != (int)on) { logged = on; LOG("[pace] game frame mode %d -> %d (%s)\n", cfg, on ? 0 : cfg, on ? "60 fps" : "as is"); }
+    if (logged != (int)on + 2 * g_za_mode_dyn) {
+        logged = (int)on + 2 * g_za_mode_dyn;
+        LOG("[pace] game frame mode %d -> %d (%s)\n", cfg, on ? 0 : cfg,
+            g_za_mode_dyn ? "60 fps, its 30 fps mode on frames that are behind" : on ? "60 fps" : "as is");
+    }
+    if (g_za_mode_dyn && za_step_n >= 1) {
+        static uint64_t n30;
+        if (++n30 % 600 == 1) LOG("[pace] frames in the game's 30 fps mode (behind): %llu so far\n", (unsigned long long)n30);
+        return cfg;
+    }
     return on ? 0 : cfg;
 }
