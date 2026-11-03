@@ -156,10 +156,11 @@ uint64_t vk_completed_seq(void) {
     return v;
 }
 
-// The indirect draws whose parameters the GPU reads in place (draw_indirect), the last IR_N of them - always on, a
-// few KB: a GPU that never finishes a submission (the 10 s stop, #70 #81 #82 #86) or loses the device shows the ones
-// still in flight with their parameters as translated and as they are now, which is what the GPU reads.
-#define IR_N 256  // (a power of two)
+// The indirect draws whose parameters the GPU reads in place (draw_indirect), the last IR_N of them - always on, some
+// 160 KB: a GPU that never finishes a submission (the 10 s stop, #70 #81 #82 #86 #106) or loses the device shows the
+// ones still in flight with their parameters as translated and as they are now, which is what the GPU reads. (256 of
+// them didn't reach back to the stuck submission in 3 of #106's 4 logs: 4096, about a frame's.)
+#define IR_N 4096  // (a power of two)
 static struct { uint64_t seq, pa, vs; uint32_t rec[5]; } ir_ring[IR_N];
 static unsigned ir_n;
 static void ir_note(uint64_t pa, const uint32_t *p, uint64_t vs) {
@@ -173,12 +174,19 @@ static void ir_dump(void) {
     unsigned lo = ir_n > IR_N ? ir_n - IR_N : 0, n = 0;
     for (unsigned k = lo; k < ir_n; k++) n += ir_ring[k & (IR_N - 1)].seq > done;
     LOG("[vk] indirect draws in flight (GPU done up to submission %llu): %u of the last %u\n", (unsigned long long)done, n, ir_n - lo);
-    unsigned skip = n > 48 ? n - 48 : 0;  // (the last 48 of them)
+    // Shown: the submission the GPU is on, then anything with a count or instances no draw has, or that changed since it
+    // was translated, then the last 16
+    unsigned shown = 0, seen = 0, oldest = 0;
     for (unsigned k = lo; k < ir_n; k++) {
         const typeof(ir_ring[0]) *e = &ir_ring[k & (IR_N - 1)];
         if (e->seq <= done) continue;
-        if (skip) { skip--; continue; }
+        seen++;
+        if (!oldest) oldest = (unsigned)e->seq;
         const uint32_t *q = (const uint32_t *)(uintptr_t)e->pa, *w = e->rec;
+        bool odd = q[0] > (1u << 22) || q[1] > (1u << 20) || w[0] > (1u << 22) || w[1] > (1u << 20) || q[0] != w[0] || q[2] != w[2] ||
+                   q[3] != w[3] || q[4] != w[4] || q[1] != w[1];
+        if (!((unsigned)e->seq == oldest && shown < 64) && !(odd && shown < 128) && seen + 16 <= n) continue;
+        shown++;
         LOG("[vk]   submission %llu vs %llx args %llx: recorded %u %u %u %d %u, now %u %u %u %d %u\n", (unsigned long long)e->seq,
             (unsigned long long)e->vs, (unsigned long long)e->pa, w[0], w[1], w[2], (int)w[3], w[4], q[0], q[1], q[2], (int)q[3], q[4]);
     }
@@ -697,6 +705,16 @@ uint64_t renderer_fence_seq(void) {
     return q;
 }
 
+// (overlap) The submission of the latest storing dispatch's copy back (gfast_finish). The game's next frame doesn't start
+// before it ran. The game resets a counter of the culling compute's list in the buffer that copy back writes (bdb60e5,
+// #82), and gfast_merge.comp can only tell a CPU write by its value: a reset to the value the dispatch started from
+// (0 over 0) looks untouched, the dispatch's count goes back in, and the list can grow over the indirect parameters in
+// the same buffer: a frame of bad draws, then the GPU stops (#106 #70 #81 #86). Not reproduced here, so that last step is
+// unproven; the race itself is real and goes with GPU load: a copy back was pending at 2130 of 5700 fence waits at 35
+// fps, 6 of 9000 at 60 (LARECOMP_LOG_STORE_WAIT=1), and those reports run mostly under 60. The Switch has no such
+// window: its fence isn't taken late. No cost measured at 38 fps. LARECOMP_GPU_STORE_WAIT=0: off.
+static _Atomic uint64_t store_seq;
+
 void renderer_wait_seq(uint64_t seq) {
     if (!seq) return;
     pthread_mutex_lock(&seq_lock);
@@ -709,6 +727,22 @@ void renderer_wait_seq(uint64_t seq) {
         pthread_mutex_lock(&seq_lock);
         uint64_t w = overlap_defer(seq, done, present_seq, deferred_seq);
         pthread_mutex_unlock(&seq_lock);
+        static int store_wait = -1;  // (store_seq: the copy back of the latest storing dispatch - upstream 7b2bc20, #106)
+        if (store_wait < 0) store_wait = !ENV("LARECOMP_GPU_STORE_WAIT") || atoi(ENV("LARECOMP_GPU_STORE_WAIT")) != 0;
+        uint64_t sw = store_wait ? atomic_load(&store_seq) : 0;
+        if (sw > seq) sw = seq;  // (a dispatch of a frame after the one waited for)
+        {   // (debug) LARECOMP_LOG_STORE_WAIT=1: how often a frame would have started ahead of a copy back
+            static long calls, ahead, longer;
+            static int lg = -1;
+            if (lg < 0) lg = ENV("LARECOMP_LOG_STORE_WAIT") ? 1 : 0;
+            if (lg) {
+                calls++;
+                ahead += sw > done;
+                longer += sw > done && sw > w;
+                if (calls % 300 == 0) LOG("[storewait] %ld fence waits: copy back still pending at %ld, the wait made longer at %ld\n", calls, ahead, longer);
+            }
+        }
+        if (sw > done && sw > w) w = sw;
         if (!w) {
             __atomic_fetch_add(&stat_deferred, 1, __ATOMIC_RELAXED);  // (the game thread; stats read on the render thread)
             wait_why = NULL;
@@ -909,6 +943,12 @@ static VkSpan guest_copy_ex(uint64_t addr, uint64_t size, bool scan) {
     return s;
 }
 static VkSpan guest_copy(uint64_t addr, uint64_t size) { return guest_copy_ex(addr, size, false); }
+
+static bool ib_guard_on(void) {  // (LARECOMP_IB_GUARD=0: draws with parameters no draw can have go through)
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_IB_GUARD") || atoi(ENV("LARECOMP_IB_GUARD")) != 0;
+    return on;
+}
 
 // ================================================================== worker threads (shader / pipeline builds)
 // First-use compiles run off the render thread; draws needing them are skipped until ready (as on Metal).
@@ -3456,6 +3496,11 @@ static uint64_t range_hash(uint64_t addr, uint64_t size) {
     const uint64_t *w = (const uint64_t *)(uintptr_t)addr;
     uint64_t h = 1469598103934665603ull, n = size / 8;
     for (uint64_t i = 0; i < n; i++) h = (h ^ w[i]) * 1099511628211ull;
+    if (size & 7) {  // (the last 1-7 bytes too: a 4- or 12-byte range's final field changing was invisible)
+        uint64_t t = 0;
+        memcpy(&t, (const uint8_t *)(uintptr_t)addr + n * 8, size & 7);
+        h = (h ^ t ^ (size & 7) << 56) * 1099511628211ull;
+    }
     return h;
 }
 static void snap_ring_import_tail(void);  // (with the lazy chunks below)
@@ -5193,6 +5238,7 @@ static void gfast_prepare(VkCommandBuffer cb) {
 // After a storing dispatch: its ranges back to the heap (before anything else reads them: draws, the CPU after the fence).
 static void gfast_finish(VkCommandBuffer cb) {
     if (!gfast_n) return;
+    if (gfast_back_n) atomic_store(&store_seq, submit_seq + 1);  // (the pending submission: renderer_wait_seq)
     vk_full_barrier(cb);
     bool merged = false;
     if (!gc_lazy && gfast_back_n && gmerge_init()) {  // (chunks: the plain copy, gmem_copy)
@@ -5390,6 +5436,14 @@ static bool vcache_lookup(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
             LOG("[vk] vertex cache off: integrated GPU\n");
             vc_on = 0;
         }
+#ifdef __linux__
+        // userptr heap import on Linux: the cache's tracking queries (vcache_lookup, vc_flush) would write-protect pages
+        // inside the import - the amdgpu stall pages_written refuses them for (upstream issue #181). Off, even with =1.
+        if (vc_on && gmem_userptr) {
+            LOG("[vk] vertex cache off: its write tracking would protect pages of the userptr heap import\n");
+            vc_on = 0;
+        }
+#endif
         if (vc_on && !pt_init()) {
             LOG("[vk] vertex cache off: no page write tracking\n");
             vc_on = 0;
@@ -5997,17 +6051,21 @@ static CsProg *compute_program(NvnProgram *np) {
     if (!ss->code_addr) return NULL;
     struct CsEnt *tab = g_cs_tab;
     int n = g_cs_n, at = -1;
-    uint64_t fp = code_fp(ss);
-    for (int i = 0; i < n && at < 0; i++)
-        if (tab[i].addr == ss->code_addr) {
-            if (tab[i].fp == fp) return tab[i].cp;
-            at = i;  // (other code there now: this entry gets the new program)
-        }
+    // The workgroup size is a specialization constant of the pipeline, read from the control section, not the code:
+    // it is part of the address cache's fingerprint (the same code with another local size got the first one's
+    // pipeline - a dispatch of the wrong number of invocations)
     uint32_t local[3];
     for (int i = 0; i < 3; i++) {
         local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
         if (!local[i]) local[i] = 1;
     }
+    uint64_t fp = code_fp(ss);
+    fp ^= ((uint64_t)local[0] | (uint64_t)local[1] << 21 | (uint64_t)local[2] << 42) * 0x9E3779B97F4A7C15ull;
+    for (int i = 0; i < n && at < 0; i++)
+        if (tab[i].addr == ss->code_addr) {
+            if (tab[i].fp == fp) return tab[i].cp;
+            at = i;  // (other code there now: this entry gets the new program)
+        }
     if (shader_rec_recording()) {
         ShaderRec rec = {.kind = 'C', .vs = shader_stage_hash(ss), .local = {local[0], local[1], local[2]}};
         shader_rec_note(&rec);
@@ -7187,6 +7245,21 @@ static void draw_(CmdRec *r, bool indexed) {
     uint64_t prof_t2_ = prof ? SDL_GetTicksNS() : 0;
     // ---- indices (copied; the largest index bounds the vertex data copied below)
     uint32_t first = 0, count = (uint32_t)r->x[2], inst, base_inst, max_index = 0;
+    {   // A count no draw has (ind_args_bad's limit, for the draws that don't pass through it): indices are copied by count, and
+        // 550 M of them, indirect parameters holding other data, ended an Intel laptop's run with "out of memory for uploads
+        // (2100 MB needed)" (upstream d8a79de; Reddit, i3-1115G4, UHD). LARECOMP_TEST_HUGE_DRAW=<frame>: one such draw there
+        static long test_at = -1;
+        if (test_at < 0) test_at = ENV("LARECOMP_TEST_HUGE_DRAW") ? atol(ENV("LARECOMP_TEST_HUGE_DRAW")) : 0;
+        if (test_at && indexed && (long)renderer_present_count() >= test_at) test_at = 0, count = 550502400;
+        if (count > (1u << 22) && ib_guard_on()) {
+            static int nlog;
+            if (nlog++ < 20)
+                LOG("[ibguard] frame %llu: skipped draw: count %u, %s\n", (unsigned long long)renderer_present_count(), count,
+                    indexed ? "indexed" : "not indexed");
+            stat_skipped_here();
+            return;
+        }
+    }
     int32_t base_vertex = 0;
     VkSpan ib = {0};
     VkIndexType itype_vk = VK_INDEX_TYPE_UINT32;
@@ -7279,6 +7352,20 @@ static void draw_(CmdRec *r, bool indexed) {
             else if (vl->divisor[s]) need = ((uint64_t)base_inst + inst) * stride + 256;
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
+            {   // No stream is this big (the game's whole mesh pool is 245 MB): the size came from indirect parameters holding
+                // other data. The draw is left out, as ind_args_bad does (upstream d8a79de; LARECOMP_IB_GUARD=0: copied)
+                enum { STREAM_COPY_MAX = 512 << 20 };
+                if (need > STREAM_COPY_MAX && ib_guard_on()) {
+                    static int nlog;
+                    if (nlog++ < 20)
+                        LOG("[ibguard] frame %llu: skipped draw: stream %d copy of %llu MB (%llx+%llx, stride %llu, divisor %u, "
+                            "max index %u, first instance %u, %u instances)\n", (unsigned long long)renderer_present_count(), s,
+                            (unsigned long long)(need >> 20), (unsigned long long)v.addr, (unsigned long long)v.size,
+                            (unsigned long long)stride, vl->divisor[s], max_index, base_inst, inst);
+                    stat_skipped_here();
+                    return;
+                }
+            }
             if (!v.addr) { static const uint8_t zero[256]; sp = vk_transient_copy(zero, 256, 16); }
             else sp = guest_copy(v.addr, need ? need : 16);
         }
@@ -7464,15 +7551,16 @@ static bool ib_overrun(CmdRec *r, const uint32_t *p, uint64_t pa) {
 // Parameters no draw can have, in blocks the GPU reads in place (#70 #81 #82 #86: the GPU stopped for 10 s, or the
 // device was lost, where blocks held other data for frames on end - every field near one small number, a base
 // instance in the hundreds of thousands): a count over 4M (ib_overrun leaves those alone), or a base instance whose
-// first element already lies past a per-instance stream's buffer (the instance attributes read far beyond it).
-// Checked as the CPU sees them, as ib_overrun (the base instance is the CPU's; only the instance count is the GPU's),
-// and skipped; LARECOMP_IB_GUARD=0 draws them.
+// first element already lies past a per-instance stream's buffer (the instance attributes read far beyond it), or
+// instances over 16M (#106: 1056971248 in such a block; the GPU would be on that one draw for good).
+// Checked as the CPU sees them, as ib_overrun (the base instance is the CPU's; the instance count is the GPU's, and in
+// every log so far a few thousand at most), and skipped; LARECOMP_IB_GUARD=0 draws them.
 static bool ind_args_bad(const uint32_t *p, uint64_t pa, bool elements) {
     static int on = -1;
     if (on < 0) on = !ENV("LARECOMP_IB_GUARD") || atoi(ENV("LARECOMP_IB_GUARD")) != 0;
     if (!on) return false;
     uint32_t binst = elements ? p[4] : p[3];
-    const char *why = p[0] > (1u << 22) ? "count over 4M" : NULL;
+    const char *why = p[0] > (1u << 22) ? "count over 4M" : p[1] > (1u << 24) ? "instances over 16M" : NULL;
     for (int a = 0; a < st.nattrib && !why; a++) {
         if (!(st.attrib[a] & 0xFF)) continue;
         uint32_t s = st.attrib[a] >> 8 & 0x1F, off = st.attrib[a] >> 13;
