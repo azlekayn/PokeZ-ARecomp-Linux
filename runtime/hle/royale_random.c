@@ -23,7 +23,14 @@
 //   LARECOMP_ROYALE_RANDOM=1   force on (overrides the setting at load); the F1 menu's "Z-A Royale randomizer" does it
 //   LARECOMP_ROYALE_DELTA=<n>  level +/- around the trainer's own level (default 5)
 //   LARECOMP_ROYALE_INFINITE=0 also leave the Infinite Royale pools alone (default: they are rolled too)
-//   LARECOMP_ROYALE_SEED=<n>   make the rolls repeatable (default: a fresh seed per load)
+//   LARECOMP_ROYALE_SEED=<n>   make the rolls repeatable (default: the save's night, below)
+//
+// One roll per in-game night, not per load: a fresh seed at every start let a player quit and reload until the
+// matchups suited them. The seed is the save's night (save_night below: its day counter and time of day, from the
+// save the game loads - save/save_0/main, read at the roll, which comes after the save is mounted), so reloading
+// within a night rolls the same teams and the next night rolls new ones. The table is read once per start: a night
+// that begins while playing takes its teams at the next start. A save that can't be read: a fresh seed, as before.
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -213,6 +220,103 @@ static void apply(uint8_t *b, size_t sz, int inf, int delta, uint32_t seed) {
     (void)nt, (void)npk;
 }
 
+#ifndef ROYALE_RANDOM_TEST
+// The save's night: Z-A's save is SwishCrypto (PKHeX SwishCrypto.cs / SCBlock.cs): the file less its 32-byte hash,
+// xored with a repeating 0x7F-byte pad, is a run of blocks - u32 key, then a type byte and the block's bytes xored
+// with an xorshift32 stream seeded by the key. Two blocks: 0x85DBDCE9 (an object; its first u32 the in-game day
+// counter - 9 -> 11 across two in-game days on a test save) and 0x7B70DA66 (f32: seconds past in-game midnight).
+// A night runs from evening past midnight to morning, never through noon: the days counted from noon to noon give
+// each night one number. Returns 0 when the save can't be read.
+static const uint8_t swish_pad[0x7F] = {
+    0xA0, 0x92, 0xD1, 0x06, 0x07, 0xDB, 0x32, 0xA1, 0xAE, 0x01, 0xF5, 0xC5, 0x1E, 0x84, 0x4F, 0xE3, 0x53, 0xCA, 0x37, 0xF4,
+    0xA7, 0xB0, 0x4D, 0xA0, 0x18, 0xB7, 0xC2, 0x97, 0xDA, 0x5F, 0x53, 0x2B, 0x75, 0xFA, 0x48, 0x16, 0xF8, 0xD4, 0x8A, 0x6F,
+    0x61, 0x05, 0xF4, 0xE2, 0xFD, 0x04, 0xB5, 0xA3, 0x0F, 0xFC, 0x44, 0x92, 0xCB, 0x32, 0xE6, 0x1B, 0xB9, 0xB1, 0x2E, 0x01,
+    0xB0, 0x56, 0x53, 0x36, 0xD2, 0xD1, 0x50, 0x3D, 0xDE, 0x5B, 0x2E, 0x0E, 0x52, 0xFD, 0xDF, 0x2F, 0x7B, 0xCA, 0x63, 0x50,
+    0xA4, 0x67, 0x5D, 0x23, 0x17, 0xC0, 0x52, 0xE1, 0xA6, 0x30, 0x7C, 0x2B, 0xB6, 0x70, 0x36, 0x5B, 0x2A, 0x27, 0x69, 0x33,
+    0xF5, 0x63, 0x7B, 0x36, 0x3F, 0x26, 0x9B, 0xA3, 0xED, 0x7A, 0x53, 0x00, 0xA4, 0x48, 0xB3, 0x50, 0x9E, 0x14, 0xA0, 0x52,
+    0xDE, 0x7E, 0x10, 0x2B, 0x1B, 0x77, 0x6E};
+typedef struct { uint32_t s; int c; } SwXs;
+static uint32_t swxs_adv(uint32_t s) { s ^= s << 2; s ^= s >> 15; s ^= s << 13; return s; }
+static SwXs swxs_init(uint32_t key) {
+    SwXs x = {key, 0};
+    for (int i = __builtin_popcount(key); i > 0; i--) x.s = swxs_adv(x.s);
+    return x;
+}
+static uint8_t swxs_next(SwXs *x) {
+    uint8_t r = (uint8_t)(x->s >> (x->c * 8));
+    if (x->c == 3) x->s = swxs_adv(x->s), x->c = 0;
+    else x->c++;
+    return r;
+}
+static uint32_t rd32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+// Block `key`'s first `n` bytes (decrypted) into out: false if absent
+static bool swish_block(const uint8_t *d, size_t len, uint32_t want, uint8_t *out, size_t n) {
+    static const uint8_t tsize[18] = {[3] = 1, [8] = 1, [9] = 2, [10] = 4, [11] = 8, [12] = 1, [13] = 2, [14] = 4, [15] = 8, [16] = 4, [17] = 8};
+    size_t o = 0;
+    while (o + 5 <= len) {
+        uint32_t key = rd32(d + o);
+        o += 4;
+        SwXs x = swxs_init(key);
+        uint8_t t = d[o++] ^ swxs_next(&x);
+        uint64_t sz;
+        if (t >= 1 && t <= 3) sz = 0;
+        else if (t == 4 || t == 5) {
+            if (o + 4 > len) return false;
+            uint8_t b[4];
+            for (int i = 0; i < 4; i++) b[i] = d[o + i] ^ swxs_next(&x);
+            o += 4;
+            sz = rd32(b);
+            if (t == 5) {
+                if (o >= len) return false;
+                uint8_t sub = d[o++] ^ swxs_next(&x);
+                if (sub >= 18 || !tsize[sub]) return false;
+                sz *= tsize[sub];
+            }
+        } else if (t < 18 && tsize[t]) sz = tsize[t];
+        else return false;  // (not a block: not this format)
+        if (sz > len - o) return false;
+        if (key == want) {
+            if (sz < n) return false;
+            for (size_t i = 0; i < n; i++) out[i] = d[o + i] ^ swxs_next(&x);
+            return true;
+        }
+        o += (size_t)sz;
+    }
+    return false;
+}
+static uint32_t save_night(char *why, size_t whyn) {
+    extern const char *g_save_dir;  // (services/fs.c: "save", or the test runs' scratch copy)
+    char path[1200];
+    for (int f = 0; f < 2; f++) {
+        snprintf(path, sizeof path, "%s/save_0/%s", g_save_dir, f ? "backup" : "main");
+        int fd = open(path, O_RDONLY);
+        struct stat st;
+        if (fd < 0) continue;
+        uint8_t *d = NULL;
+        size_t len = 0;
+        if (!fstat(fd, &st) && st.st_size > 64 && st.st_size <= (64 << 20) && (d = malloc((size_t)st.st_size))) {
+            len = (size_t)st.st_size - 32;  // (less the hash)
+            if (pread(fd, d, (size_t)st.st_size, 0) != st.st_size) len = 0;
+        }
+        close(fd);
+        for (size_t i = 0; i < len; i++) d[i] ^= swish_pad[i % 0x7F];
+        uint8_t day[4], tod[4];
+        bool ok = len && swish_block(d, len, 0x85DBDCE9u, day, 4) && swish_block(d, len, 0x7B70DA66u, tod, 4);
+        free(d);
+        if (!ok) continue;
+        float secs;
+        uint32_t t = rd32(tod);
+        memcpy(&secs, &t, 4);
+        uint32_t n = rd32(day) * 2 + (secs >= 12 * 3600.0f ? 1 : 0);  // (noon to noon: (day - 1) PM and day AM -> one)
+        snprintf(why, whyn, "%s: day %u, %02d:%02d -> night %u", path, rd32(day), (int)(secs / 3600) % 24, (int)(secs / 60) % 60,
+                 (n + 1) / 2);
+        return (n + 1) / 2 + 1;  // (+1: never 0)
+    }
+    snprintf(why, whyn, "%s/save_0: no readable save", g_save_dir);
+    return 0;
+}
+#endif
+
 int za_royale_random_on(void) {
 #ifdef ROYALE_RANDOM_TEST
     return 0;
@@ -241,8 +345,18 @@ void za_royale_random_roll(uint8_t *buf, size_t size) {
         e = ENV("LARECOMP_ROYALE_DELTA");
         delta = e ? atoi(e) : g_settings.za_royale_delta;
         e = ENV("LARECOMP_ROYALE_SEED");
+        char why[1400];
+        uint32_t night = 0;
         if (e && *e) seed = (uint32_t)strtoul(e, NULL, 0);
-        else { uint64_t t = plat_now_ns(); t ^= t >> 33; t *= 0xff51afd7ed558ccdull; t ^= t >> 33; seed = (uint32_t)t; }
+        else if ((night = save_night(why, sizeof why))) {  // (the night's own roll: reloading it keeps the teams)
+            uint64_t t = night * 0x9e3779b97f4a7c15ull + 0x5a52;  // (+ a constant: night n's roll is no other mode's seed n)
+            t ^= t >> 33; t *= 0xff51afd7ed558ccdull; t ^= t >> 33;
+            seed = (uint32_t)t;
+            LOG("[royalerandom] %s\n", why);
+        } else {
+            LOG("[royalerandom] %s: a fresh roll\n", why);
+            uint64_t t = plat_now_ns(); t ^= t >> 33; t *= 0xff51afd7ed558ccdull; t ^= t >> 33; seed = (uint32_t)t;
+        }
     }
 #endif
     if (delta < 0) delta = 0;
