@@ -103,6 +103,19 @@ static bool build_is_za(const uint8_t id[8]) { return build_version(id) && memcm
 #define LARECOMP_VERSION "v0.1.10"
 extern "C" const char *rt_version(void) { return LARECOMP_VERSION; }  // (runtime/main.c: the log's first line)
 extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (the shader caches' tag)
+extern "C" const char *rt_build_label(void);  // runtime/build_info.c: "b<N> <commit>", "dev" outside the packaging
+// The version as the start screen shows it: "v0.1.10-b101" - the AppImage's build number (ZA_BUILD) after the release
+// tag, so a screenshot says which test build it was. A dev build (no b<N>) shows the tag alone
+static const char *version_label(void) {
+    static char v[64];
+    if (!v[0]) {
+        const char *b = rt_build_label();
+        size_t n = strcspn(b, " ");
+        bool numbered = b[0] == 'b' && n > 1 && strspn(b + 1, "0123456789") == n - 1;
+        snprintf(v, sizeof v, numbered ? "%s-%.*s" : "%s", LARECOMP_VERSION, (int)n, b);
+    }
+    return v;
+}
 
 // ------------------------------------------------------------------ language
 // The start screen speaks English or Portuguese: settings ui_lang (the PT | EN switch in its top bar), auto = the
@@ -2251,10 +2264,10 @@ extern "C" void launcher_run(const char *root) {
             dl->AddLine(P(0, 64), P(W_, 64), IM_COL32(255, 255, 255, 18), 1.2f * g_s);
             logo(dl, 26, 17, 30);
             float lx = 64 + text(dl, F_H2, 20, 64, 32 - text_size(F_H2, 20, "ZA RECOMP").y / 2, C_TEXT, "ZA RECOMP").x;
-            text(dl, F_SMALL, 13, lx + 8, 32 - text_size(F_SMALL, 13, "v").y / 2 + 1, C_MUTED, LARECOMP_VERSION);
+            float vw = text(dl, F_SMALL, 13, lx + 8, 32 - text_size(F_SMALL, 13, "v").y / 2 + 1, C_MUTED, version_label()).x;
             const char *tab_names[N_TABS] = {TR("Play", "Jogar"), TR("Mods", "Mods"), TR("Saves", "Saves"),
                                              TR("Settings", "Configurações"), TR("About", "Sobre")};
-            float tx = lx + 70;
+            float tx = lx + fmaxf(70, vw + 22);  // (the pages after the version: a longer "-b<N>" one pushes them along)
             int prev_tab = g_tab;
             for (int i = 0; i < N_TABS; i++) {
                 float tw = text_size(F_LABEL, 15, tab_names[i]).x + 32;
@@ -2739,7 +2752,7 @@ extern "C" void launcher_run(const char *root) {
                 float x = 72, w = fminf(760, W_ - 144), y = 100;
                 y += text(dl, F_H1, 40, x, y, C_TEXT, "ZA Recomp").y + 4;
                 y += text(dl, F_LABEL, 16, x, y, C_GOLD_HI,
-                          (std::string(TR("Version ", "Versão ")) + tag_label(LARECOMP_VERSION, false)).c_str()).y + 18;
+                          (std::string(TR("Version ", "Versão ")) + tag_label(LARECOMP_VERSION, false) + (version_label() + strlen(LARECOMP_VERSION))).c_str()).y + 18;
                 const char *about = TR("A PC port of Pokémon Legends: Z-A made by static recompilation: the game's code is "
                                        "turned into native code for your PC, and the Switch's system and graphics are "
                                        "rebuilt around it. Built on LAS Recomp by Peiikai and its contributors, with "
