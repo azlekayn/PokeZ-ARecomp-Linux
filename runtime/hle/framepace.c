@@ -226,7 +226,7 @@ void rt_za_cam_dt(uint32_t which, uint32_t sel, uint64_t provider, uint64_t reco
     if (!g_za_cam_ns_cur[which]) g_za_cam_ns_cur[which] = (int64_t)ns ? (int64_t)ns : 1, g_za_cam_sel[which] = sel;
 }
 
-// (60 fps, frame_dt) LARECOMP_FRAME_MODE_DYN=1: a frame the accumulator says is behind (rt_za_frame_dt's step 1+, read
+// (60 fps, frame_dt; on by default, LARECOMP_FRAME_MODE_DYN=0 off) A frame the accumulator says is behind (rt_za_frame_dt's step 1+, read
 // earlier in the same function) runs in the game's own 30 fps mode, the rest in its 60 fps mode. The per-channel
 // catch-up (rt_za_frame_step) gave channel 1 - the world's speed - two ticks while the game believed it was in its 60 fps
 // mode, and its UI timelines then never finished: the ambush's "ADVANTAGE / Now's your chance!" stayed on screen, the
@@ -235,14 +235,16 @@ void rt_za_cam_dt(uint32_t which, uint32_t sel, uint64_t provider, uint64_t reco
 // step) itself, as it does on the Switch. Its present interval of 2 for those frames is held at 1 (g_za_mode_dyn:
 // objects.c present_pace) - our accumulator, not the interval, keeps the speed. =2 keeps the game's interval instead:
 // a frame that moved the world two ticks stays on screen two vsyncs (the camera judder test: with =1 the world moves
-// 1, 1, 1, 2 ticks a frame while every frame shows ~21 ms at 47 fps).
+// 1, 1, 1, 2 ticks a frame while every frame shows ~21 ms at 47 fps). It made no difference on the Deck (2026-11-02):
+// the judder that remains below 60 is the world moving in whole 1/60 s ticks - 1.28 a frame at 47 fps can only be
+// 1, 1, 1, 2 - and goes as the frame rate nears 60. (Smooth alternatives: the game's own 30 fps mode, or slow motion.)
 bool g_za_mode_dyn, g_za_mode_dyn_interval;
 int32_t rt_za_frame_cfg(int32_t cfg) {
     g_za_frame_hook = true;
     const char *e = ENV("LARECOMP_FPS");
     bool on = e ? atoi(e) >= 60 : fps60_holds();
     static int dyn = -1;
-    if (dyn < 0) dyn = ENV("LARECOMP_FRAME_MODE_DYN") ? atoi(ENV("LARECOMP_FRAME_MODE_DYN")) : 0;
+    if (dyn < 0) dyn = ENV("LARECOMP_FRAME_MODE_DYN") ? atoi(ENV("LARECOMP_FRAME_MODE_DYN")) : 1;
     g_za_mode_dyn = dyn && on && g_settings.frame_dt && cfg > 0;
     g_za_mode_dyn_interval = g_za_mode_dyn && dyn == 2;
     static int logged = -1;
