@@ -783,8 +783,19 @@ void input_frame(uint64_t frame) {
     extern void watch_arm(void);
     watch_arm();
     host_test_frame(frame);
+    extern void devtools_frame(uint64_t frame), devtools_input(uint64_t frame, uint64_t *b, int32_t v[4]);
+    extern bool devtools_on(void);
+    devtools_frame(frame);  // (runtime/devtools.c, LARECOMP_DEVTOOLS=1: frame times, its key releases)
     const char *spec = getenv("LARECOMP_INPUT");
-    if (!spec) return;
+    if (!spec) {
+        if (devtools_on()) {  // (its holds, where LARECOMP_INPUT's go)
+            uint64_t b = 0;
+            int32_t v[4] = {0};
+            devtools_input(frame, &b, v);
+            script_buttons = b, script_lx = v[0], script_ly = v[1], script_rx = v[2], script_ry = v[3];
+        }
+        return;
+    }
     // (parsed once: a recording (LARECOMP_RECORD_INPUT) is thousands of entries; a later entry's axis wins)
     typedef struct { uint64_t start, len, b; int32_t v[4]; uint8_t set; } Ev;  // (v: lx ly rx ry, set: which of them)
     static Ev *ev;
@@ -837,6 +848,7 @@ void input_frame(uint64_t frame) {
         b |= e->b;
         for (int a = 0; a < 4; a++) if (e->set >> a & 1) v[a] = e->v[a];
     }
+    devtools_input(frame, &b, v);  // (runtime/devtools.c: a command's hold, on top of the script)
     int32_t lx = v[0], ly = v[1], rx = v[2], ry = v[3];
     {  // test hooks steering the stick (runtime/hle/doorjump.c LARECOMP_DOORJUMP_TEST)
         extern int32_t g_test_lx, g_test_ly;

@@ -2152,9 +2152,11 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     extern volatile int g_shot_request;  // F10 (runtime/hle/input.c): the game image -> screenshots/shot_<frame>.png
     if (g_shot_request) {
         g_shot_request = 0;
-        char path[256];
+        char path[512];
+        extern char g_devtools_shot_path[512];  // (runtime/devtools.c `shot <file>`: that path, once)
         mkdir("screenshots", 0755);
-        snprintf(path, sizeof path, "screenshots/shot_%05llu.png", (unsigned long long)frame);
+        if (g_devtools_shot_path[0]) snprintf(path, sizeof path, "%s", g_devtools_shot_path), g_devtools_shot_path[0] = 0;
+        else snprintf(path, sizeof path, "screenshots/shot_%05llu.png", (unsigned long long)frame);
         renderer_save_texture_tex(b, path);
         LOG("[shot] frame %llu -> %s\n", (unsigned long long)frame, path);
     }

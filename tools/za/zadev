@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+# ZA DevTools command line (Linux): sends commands to a game started with LARECOMP_DEVTOOLS=1 (runtime/devtools.c has
+# the full list) and prints each reply. Each argument is one command, run in order; a reply starting "err" stops the
+# rest and exits 1.
+#
+#   zadev status
+#   zadev "press A" "wait 90" "shot /tmp/after_a.png"
+#   zadev "hold STICK_UP 120" "wait 120" "mark ambush" "shot"
+#   ssh deck@wingdeck tools/za/zadev "key F1" "wait 30" shot      (over ssh: the socket is the Deck's own)
+#
+# Socket: --sock, else LARECOMP_DEVTOOLS_SOCK, else $XDG_RUNTIME_DIR/za-devtools.sock, else /tmp/za-devtools-<uid>.sock
+# (the game's rules). ssh sessions often have no XDG_RUNTIME_DIR: /run/user/<uid> is tried too.
+import os, socket, sys
+
+
+def sock_path(arg):
+    if arg:
+        return arg
+    if os.environ.get("LARECOMP_DEVTOOLS_SOCK"):
+        return os.environ["LARECOMP_DEVTOOLS_SOCK"]
+    cands = []
+    if os.environ.get("XDG_RUNTIME_DIR"):
+        cands.append(os.path.join(os.environ["XDG_RUNTIME_DIR"], "za-devtools.sock"))
+    cands += [f"/run/user/{os.getuid()}/za-devtools.sock", f"/tmp/za-devtools-{os.getuid()}.sock"]
+    for c in cands:
+        if os.path.exists(c):
+            return c
+    return cands[0]
+
+
+def main(argv):
+    sock = None
+    if len(argv) >= 2 and argv[0] == "--sock":
+        sock, argv = argv[1], argv[2:]
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__ if __doc__ else open(__file__).read().split("\nimport")[0])
+        return 0
+    path = sock_path(sock)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(path)
+    except OSError as e:
+        print(f"err can't reach the game at {path}: {e} (started with LARECOMP_DEVTOOLS=1?)", file=sys.stderr)
+        return 2
+    f = s.makefile("rw", encoding="utf-8", newline="\n")
+    for cmd in argv:
+        f.write(cmd.strip() + "\n")
+        f.flush()
+        line = f.readline()
+        if not line:
+            print("err the game closed the connection", file=sys.stderr)
+            return 2
+        line = line.rstrip("\n")
+        print(f"{cmd}: {line}")
+        if line.startswith("err"):
+            return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
