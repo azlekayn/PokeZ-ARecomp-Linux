@@ -16,6 +16,7 @@
 //   mark [<note>]            "[devtools] mark" in the log with the frame: where the bug was on screen
 //   f9                       the next frame's passes (with LARECOMP_DEBUG_FRAMES=1, as F9)
 //   gpuprof                  GPU time per pass of the next frame ("[gpuprof]" in the log, as LARECOMP_GPUPROF_AT)
+//   set <name> <n>           a switch in the running game, for an A/B at one spot: ssgi_half (LARECOMP_SSGI_HALF)
 // The input goes in where LARECOMP_INPUT's does (runtime/hle/input.c script_buttons): the game sees it, the F1 menu
 // doesn't - `key` reaches the menu. Socket: LARECOMP_DEVTOOLS_SOCK, else $XDG_RUNTIME_DIR/za-devtools.sock, else
 // /tmp/za-devtools-<uid>.sock (this user only: 0600).
@@ -254,8 +255,19 @@ static void command(int fd, char *c) {
         return;
     }
     if (!strcmp(c, "f9")) { g_debug_frame_request = 1; reply(fd, "ok"); return; }
+    if (!strncmp(c, "set ", 4)) {
+        extern int g_ssgi_half;  // (nvn/vulkan/exec.c)
+        static const struct { const char *name; int *v; } sw[] = {{"ssgi_half", &g_ssgi_half}};
+        char name[64];
+        int v;
+        if (sscanf(c + 4, "%63s %d", name, &v) == 2)
+            for (size_t i = 0; i < sizeof sw / sizeof sw[0]; i++)
+                if (!strcmp(name, sw[i].name)) { *sw[i].v = v; reply(fd, "ok %s %d", name, v); return; }
+        reply(fd, "err set <name> <n>: ssgi_half");
+        return;
+    }
     if (!strcmp(c, "gpuprof")) { g_gpuprof_request = 1; reply(fd, "ok frame %llu", (unsigned long long)f); return; }
-    reply(fd, "err unknown command (ping status shot hold press release key wait mark f9 gpuprof)");
+    reply(fd, "err unknown command (ping status shot hold press release key wait mark f9 gpuprof set)");
 }
 
 static void *serve(void *arg) {
