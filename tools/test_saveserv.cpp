@@ -28,7 +28,6 @@ int plat_proc_wait(PlatProc p, bool) {
     waitpid((pid_t)p, &st, 0);
     return WIFEXITED(st) ? WEXITSTATUS(st) : 255;
 }
-int plat_rename(const char *a, const char *b) { return rename(a, b); }
 }
 static const char *name(SaveServState s) {
     const char *n[] = {"OFF", "PAIRING", "BUSY", "SYNCED", "OFFLINE", "CONFLICT", "NEWER", "ERROR"};

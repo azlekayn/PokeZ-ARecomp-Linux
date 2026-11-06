@@ -24,6 +24,11 @@
 //
 // Threads: everything that can wait on the network runs on one host thread (not a guest thread: it isn't stopped by a
 // reboot). g_m guards the settings and the status; it is never held across a request.
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 #include <ctype.h>
 #include <errno.h>
 #include <pthread.h>
@@ -108,6 +113,17 @@ static std::string read_file(const std::string &path, bool *ok = NULL) {
 }
 
 // temp file + flush + rename: a crash never leaves a torn file. private: readable by this user only (the token)
+// A finished temp file over the real one. Not plat_rename: that is the console's rename and refuses a target that exists,
+// so every file here could be written once: the state's revision stuck (the next save then looked like a conflict and
+// wasn't sent), and a download over an existing save failed.
+static bool replace_file(const char *from, const char *to) {
+#ifdef _WIN32
+    return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    return rename(from, to) == 0;
+#endif
+}
+
 static bool write_atomic(const std::string &path, const std::string &data, bool priv = false) {
     std::string tmp = path + ".saveserv-tmp";
     remove(tmp.c_str());
@@ -124,7 +140,7 @@ static bool write_atomic(const std::string &path, const std::string &data, bool 
     ok = ok && fsync(fileno(f)) == 0;
 #endif
     ok = fclose(f) == 0 && ok;
-    if (ok) ok = plat_rename(tmp.c_str(), path.c_str()) == 0;
+    if (ok) ok = replace_file(tmp.c_str(), path.c_str());
     if (!ok) remove(tmp.c_str());
     return ok;
 }
