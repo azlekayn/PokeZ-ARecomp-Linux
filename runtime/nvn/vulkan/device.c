@@ -1979,7 +1979,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     if (pp_on < 0) pp_on = getenv("LARECOMP_VK_PROF") != NULL;
     if (pp_on) pp_t = SDL_GetTicksNS();
     TexBackend *b = vk_tex(t, true);
-    b->presented = true;
+    b->presented = b->shown = true;
     vk_end_pass();
     ov_last = VK_NULL_HANDLE;  // (this frame's overlay, if any, is set by vk_overlay_end below)
     // the HD texture switch (F1 > Textures, applied while playing): between frames, on the thread that uploads the
@@ -2041,6 +2041,13 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         }
         OutScale os;
         output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, game_ms, win_ms, &os);
+        {   // F1 > FSR render resolution: the scene drawn smaller, FSR 2 upscaling it (exec.c vk_taa_render_share)
+            extern float vk_taa_render_share(void);
+            extern void renderer_set_present_full(bool on);
+            float k = vk_taa_render_share();
+            if (k < 1) os.sx *= k, os.sy *= k, os.lines *= k * 0.5f;  // (the textures' mip bias: log2(render / display) - 1, as AMD advises)
+            renderer_set_present_full(k < 1);
+        }
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
         output_scale_log((unsigned long long)frame, dw, dh, &os);  // (diagnostics: [scale] on a change)
         // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
@@ -2069,6 +2076,11 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             double pic = g_present_crop[3] > 0 ? g_present_crop[3] : g_present_tex[1] > 0 ? g_present_tex[1] : 1080;
             double uy = on && vh > 0 ? vh / pic : 0, ux = uy * (sy > 0 ? sx / sy : 1);
             if (uy < sy * 1.01 || uy > 4) uy = ux = 0;  // (the scene's scale already, or more than the GPU would like)
+            // FSR 2 wanted: the shown image is its output and takes the scene's image size (exec.c fsr2_copy), the UI scale
+            // the allocation's. Without this a UI scale fixed at another size (the sticky one below: 1.333 from the first
+            // frame with a 1.5x scene) stops FSR 2 from ever resolving, and so upscaling from ever starting.
+            extern bool vk_taa_wants_whole(void);
+            if (on && vk_taa_wants_whole()) ux = os.ax, uy = os.ay;
             static double lu = -1;
             if (fabs(uy - lu) > 1e-4) {
                 lu = uy;

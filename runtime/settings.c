@@ -33,6 +33,7 @@ Settings g_settings = {
     .menu_confirm = MENU_CONFIRM_CONTROLLER,
     .show_fps = false,
     .tex_hd = true,
+    .taa_render = 100,
     .shadow_res = 1,
     .shadow_sharp = 1,
     .gtao_strength = 100,
@@ -227,6 +228,7 @@ void settings_load(void) {
             for (int i = 0; i < SHARPEN_N; i++) if (!strcmp(val, sharpen_names[i])) g_settings.sharpen = i;
         }
         else if (!strcmp(key, "temporal_aa")) g_settings.taa = !strcmp(val, "fsr2");
+        else if (!strcmp(key, "temporal_aa_render")) { int v = atoi(val); g_settings.taa_render = v >= 50 && v <= 100 ? v : 100; }
         else if (!strcmp(key, "framegen")) g_settings.framegen = atoi(val) != 0;
         else if (!strcmp(key, "fg_strength")) { float v = (float)atof(val); g_settings.fg_strength = v < 0 ? 0 : v > 1 ? 1 : v; }
         else if (!strcmp(key, "fg_thresh")) { float v = (float)atof(val); g_settings.fg_thresh = v < 0 ? 0 : v > 16 ? 16 : v; }
@@ -336,6 +338,7 @@ void settings_save(void) {
     fprintf(f, "indirect_light_strength = %d\n", g_settings.ssgi_strength);
     fprintf(f, "water_reflections = %d\n", g_settings.water_ssr);
     fprintf(f, "temporal_aa = %s\n", g_settings.taa ? "fsr2" : "game");  // (PR#57 parsed it but never saved it)
+    fprintf(f, "temporal_aa_render = %d\n", g_settings.taa_render);
     fprintf(f, "framegen = %d\n", g_settings.framegen);
     fprintf(f, "fg_strength = %.2f\n", g_settings.fg_strength);
     fprintf(f, "fg_thresh = %.1f\n", g_settings.fg_thresh);

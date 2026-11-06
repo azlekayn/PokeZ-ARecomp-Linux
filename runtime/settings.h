@@ -38,6 +38,7 @@ typedef struct {
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     int sharpen;         // SHARPEN_*: sharpening of the image in the window (Vulkan)
     bool taa;            // Pokémon Z-A: AMD FSR 2's temporal anti-aliasing in place of the game's own (vulkan/exec.c fsr2_copy)
+    int taa_render;      // with it: the scene's share of the resolution in percent, 50-100 (F1: 67 / 59 / 50, FSR upscales it; 100: anti-aliasing only)
     bool framegen;       // Pokémon Z-A: a generated frame between two, from their colour + motion (vulkan/exec.c vk_fg_build)
     float fg_strength;   // 0..1: how far the generated frame moves toward the midpoint of the two (1: exactly between)
     float fg_thresh;     // px: motion under which a pixel keeps the current frame, so static things and the HUD stay sharp
