@@ -113,18 +113,20 @@ static int passes_in_sub;  // render passes in the submission being recorded (LA
 // before their GPU time is known: in this mode an end counter reports the latest completed frame's GPU span
 // (cq_resolve keeps it host side and no longer writes the game's memory late - the game may have reused the slot).
 // LARECOMP_GPU_OVERLAP=0: off (the wait on the fence's own submission, as before); =1: on.
-#define VK_OVERLAP_DEFAULT 1  // on where the write watch can run (overlap_on: off by itself without page write tracking)
+#define VK_OVERLAP_DEFAULT 1  // on (overlap_on), with or without page write tracking
 static uint64_t deferred_seq[2];  // (seq_lock) the latest two fences the game waited on, newest first (overlap_defer)
 extern bool g_vk_submit_untimed;  // (renderer_submit, below)
 static uint64_t present_seq[2];   // (seq_lock) the game's latest two presents' submissions, newest first: frames' ends
 static uint64_t stat_deferred;  // SyncWaits returned without waiting (stats)
 static uint64_t stat_snap_bytes, stat_snap_copies;  // storage copies made (snap_storage; stats, per period)
-// The overlap needs the storage write watch (snap_storage: the OS's page write tracking), the only thing that catches
-// the game rewriting its light lists with the same bytes while the GPU reads them. Where the OS gives no tracking
-// (Linux over a userptr or dma-buf heap - AMD, the Steam Deck -, a kernel before 6.7 without PAGEMAP_SCAN, a
-// container without userfaultfd, a Windows window reserved without write watch) the overlap turns itself off: the
-// full fence wait as before. LARECOMP_GPU_OVERLAP=1 forces it on anyway (tests; the hash probe stands in for the
-// watch then), =0 turns it off.
+// The overlap's storage copies use the write watch (snap_storage: the OS's page write tracking), the surest way to catch
+// the game rewriting its light lists with the same bytes while the GPU reads them. Where the OS gives no tracking (Linux
+// over a userptr or dma-buf heap - AMD, the Steam Deck -, a kernel before 6.7 without PAGEMAP_SCAN, a container without
+// userfaultfd, a Windows window reserved without write watch) the hash probe stands in. The overlap used to turn itself
+// off there, and that was the worse choice: everything that hardens the frame against the game's rewrites only runs
+// under the overlap (the one-frame-late wait, the private indirect records, the snapshots), so off meant one late frame
+// held for good (RX 7800 XT: 60 -> 52 fps until a restart) and floats read as instance counts, then a ring timeout that
+// reset the GPU (2026-11-06). On with the hash probe it held 60 there. LARECOMP_GPU_OVERLAP=0: off.
 static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);  // (the page tables below)
 static const char *heap_tracking_reason(void);  // (why the heap has no page write tracking, for the log)
 static bool overlap_on(void) {
@@ -134,14 +136,10 @@ static bool overlap_on(void) {
         uint32_t g;
         bool tracked = (!w || atoi(w) != 0) && pages_cpu_written(HEAP_BASE, 4096, 0, &g) >= 0;
         if (e) on = atoi(e) != 0;
-        else if (VK_OVERLAP_DEFAULT && !tracked) {
-            on = 0;
-            LOG("[vk] GPU overlap off: no page write tracking on this system (%s); LARECOMP_GPU_OVERLAP=1 forces it on\n",
-                w && atoi(w) == 0 ? "LARECOMP_OVERLAP_WATCH=0" : heap_tracking_reason());
-            return on;
-        } else on = VK_OVERLAP_DEFAULT;
-        LOG("[vk] GPU overlap %s (the game's frame fence waited one frame late; LARECOMP_GPU_OVERLAP=%d: %s%s)\n", on ? "on" : "off",
-            !on, on ? "off" : "on", on && !tracked ? "; forced without page write tracking: the hash probe instead of the write watch" : "");
+        else on = VK_OVERLAP_DEFAULT;
+        LOG("[vk] GPU overlap %s (the game's frame fence waited one frame late; LARECOMP_GPU_OVERLAP=%d: %s%s%s%s)\n", on ? "on" : "off",
+            !on, on ? "off" : "on", on && !tracked ? "; no page write tracking (" : "", on && !tracked ? heap_tracking_reason() : "",
+            on && !tracked ? "): the hash probe instead of the write watch" : "");
     }
     return on;
 }
