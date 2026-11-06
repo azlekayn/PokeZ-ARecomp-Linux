@@ -1044,7 +1044,7 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  for (int i = 0; i < 48; i++) {\n"
                 "    vec3 Q = P + R * t;\n"
                 "    vec2 q = to_uv(vp, Q, dz);\n"
-                "    if (any(lessThan(q, vec2(0.0))) || any(greaterThan(q, vec2(1.0))) || dz <= 0.0) break;\n"
+                "    if (any(lessThan(q, vec2(0.0))) || any(greaterThan(q, pc.prj.xy)) || dz <= 0.0) break;\n"
                 "    float ds = depth_at(t1, q);\n"
                 "    if (ds > dz) {\n"  // (the scene is in front of the ray here: it passed behind something)
                 "      if (length(wpos(q, ds) - Q) < t * 0.2 + 0.25) { found = 1.0; hit = q; }\n"
@@ -1054,9 +1054,9 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  }\n"
                 "  if (found == 0.0) {\n"  // (nothing hit: the sky, where the far end of the ray is on screen and is sky)
                 "    vec2 q = to_uv(vp, P + R * 5000.0, dz);\n"
-                "    if (all(greaterThanEqual(q, vec2(0.0))) && all(lessThanEqual(q, vec2(1.0))) && depth_at(t1, q) <= 0.0) { found = 1.0; hit = q; }\n"
+                "    if (all(greaterThanEqual(q, vec2(0.0))) && all(lessThanEqual(q, pc.prj.xy)) && depth_at(t1, q) <= 0.0) { found = 1.0; hit = q; }\n"
                 "  }\n"
-                "  vec2 e = min(hit, 1.0 - hit);\n"
+                "  vec2 e = min(hit, pc.prj.xy - hit);\n"  // (prj.xy: the picture's end in the image, exec.c water_apply_pending)
                 "  float edge = found * clamp(min(e.x, e.y) * 12.0, 0.0, 1.0);\n"
                 "  vec3 col = mix(textureLod(t3, R, 1.0).rgb, textureLod(t2, hit, 0.0).rgb, edge);\n"  // (off the picture: the game's reflection cube)
                 "  if (pc.prj.z != 0.0) { o = vec4(col, 1.0); return; }\n"

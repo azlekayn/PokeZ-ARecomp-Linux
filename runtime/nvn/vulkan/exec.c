@@ -9328,6 +9328,21 @@ static void gtao_before_lighting(Prog *pr) {
     pc[30] = gtao_env("LARECOMP_GTAO_DEBUG", 0);
     pc[31] = (float)(gtao_level() + 1);  // (slices: 2 / 3 / 4, twice as many steps each)  // (1: the lit image replaced by the AO alone, to check it)
     if (pc[28] <= 0 || pc[29] <= 0) return;
+    // The scene in a part of its images (FSR's render resolution, Dynamic resolution): the game's reconstruction above goes
+    // by its own coordinates, 0..1 over the whole picture, while these passes' uv are the image's, 0..share over the part
+    // drawn. Without this every world position was off, more toward the part's far corner: AO and bounce light in stripes
+    // around whatever met the ground, water mirroring the wrong place. Rewritten for the image's uv, which the passes
+    // keep for all their reads: ndc = (ndc' + 1) / share - 1, so m0, m1 over the share and the rest into m3. Their radius
+    // on screen scales with it (prj: the march's uv per metre; the widest radius, prm.w, below).
+    const float gk_x = (float)content_extent((int)db->width, db->scalable, db->sx, db->ax) / (float)db->width,
+                gk_y = (float)content_extent((int)db->height, db->scalable, db->sy, db->ay) / (float)db->height;
+    if (gk_x < 1 || gk_y < 1) {
+        for (int i = 0; i < 4; i++) {
+            pc[12 + i] += (1 / gk_x - 1) * pc[0 + i] + (1 / gk_y - 1) * pc[22] * pc[4 + i];
+            pc[0 + i] /= gk_x, pc[4 + i] /= gk_y;
+        }
+        pc[28] /= gk_x, pc[29] /= gk_y;
+    }
     gtao.depth = dv;
     if (ssgi_on()) {  // (SSGI: the G-buffer's albedo - its sRGB colour target at the depth's size - for ssgi_apply)
         ssgi.albedo = VK_NULL_HANDLE;
@@ -9363,6 +9378,7 @@ static void gtao_before_lighting(Prog *pr) {
         gtao.fx = fminf(1, (vp[0] + vp[2]) / (float)de->tex->width);
         gtao.fy = fminf(1, (vp[1] + vp[3]) / (float)de->tex->height);
     }
+    if (region) gtao.fx *= gk_x, gtao.fy *= gk_y;  // (and the scene's share of the image: above)
     if (!gtao_on()) { gtao.ao = VK_NULL_HANDLE; return; }
     // the G-buffer's normals for the march (t2): the lighting's first RGBA8 texture at the depth's size, after its two
     // depth reads. LARECOMP_GTAO_GBUF_NORMALS=0: the normals from the depth, as before
@@ -9377,7 +9393,7 @@ static void gtao_before_lighting(Prog *pr) {
     // fraction of the width (LARECOMP_GTAO_MAXR; 0: no limit)
     float maxr = gtao_env("LARECOMP_GTAO_MAXR", 0.2f);
     if (maxr <= 0) maxr = 1000.0f;
-    pc[23] = nv ? maxr : -maxr;
+    pc[23] = (nv ? maxr : -maxr) * gk_x;
     // a second pass of the filter (back into the raw image): the few steps of a wide radius leave blotches a single
     // 5x5 pass doesn't smooth. A GPU cost, so off in the Deck's profile (settings_profile_deck); LARECOMP_GTAO_BLUR2=0/1
     bool blur2 = gtao_env("LARECOMP_GTAO_BLUR2", settings_profile_deck() ? 0 : 1) != 0 && pc[30] < 2;
@@ -9583,9 +9599,13 @@ static void water_apply_pending(void) {
     pc[23] = (float)(renderer_exec_frame() % 36000) / 60.0f;  // (the ripples' time, in seconds)
     pc[24] = pc[26] = (float)tb->width, pc[25] = pc[27] = (float)tb->height;
     pc[30] = gtao_env("LARECOMP_WATER_DEBUG", 0);
+    pc[28] = gtao.fx, pc[29] = gtao.fy;  // (prj.xy, unused by this shader: where the picture ends in the image, for its rays)
     post_pc_big = pc;
     VkImageView in[4] = {dnow, dpre, cpre, probe};
+    if (gtao.fx < 1 || gtao.fy < 1)  // (as the AO's apply: only the part the frame has)
+        post_area_w = (uint32_t)ceilf(tb->width * gtao.fx) + 2, post_area_h = (uint32_t)ceilf(tb->height * gtao.fy) + 2;
     post_pass_ex(vk_cmd(), "water_ssr.frag", in, 4, tb, NULL, false, NULL, pc[30] != 0 ? 0 : 5);
+    post_area_w = post_area_h = 0;
     post_pc_big = NULL;
     static int nlog;
     if (nlog++ < 2) LOG("[water] reflections on: %ux%u, strength %.2f\n", tb->width, tb->height, pc[20]);
