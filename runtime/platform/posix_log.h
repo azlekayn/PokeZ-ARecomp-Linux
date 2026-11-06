@@ -72,11 +72,58 @@ static void session_log_prune(const char *dir) {
     free(logs);
 }
 
+// A session that ended in a crash keeps its log as <dir>/logs/crash-<date>.log, the last 3 only: five more starts prune
+// its backup otherwise, and a crash is what you look for after the fact. "Ended in a crash" = the crash dialog's "[crash]"
+// line in the log's last 8 KB. (Windows: platform/windows.c plat_keep_crash_log, on its logs/play.log.)
+static int session_log_name_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+static void session_log_keep_crash(const char *dir) {
+    char from[1100], logs[1100], to[1200];
+    snprintf(from, sizeof from, "%s/lasrecomp.log", dir);
+    FILE *in = fopen(from, "rb");
+    if (!in) return;
+    static char tail[8193];
+    fseek(in, 0, SEEK_END);
+    long sz = ftell(in);
+    fseek(in, sz > 8192 ? sz - 8192 : 0, SEEK_SET);
+    size_t got = fread(tail, 1, 8192, in);
+    tail[got] = 0;
+    for (size_t i = 0; i < got; i++) if (!tail[i]) tail[i] = ' ';
+    if (!strstr(tail, "[crash]")) { fclose(in); return; }
+    snprintf(logs, sizeof logs, "%s/logs", dir);
+    mkdir(logs, 0755);
+    char when[32];
+    time_t now = time(NULL);
+    strftime(when, sizeof when, "%Y%m%d-%H%M%S", localtime(&now));
+    snprintf(to, sizeof to, "%s/crash-%s.log", logs, when);
+    FILE *out = fopen(to, "wb");
+    if (out) {
+        static char buf[65536];
+        size_t n;
+        fseek(in, 0, SEEK_SET);
+        while ((n = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, n, out);
+        fclose(out);
+    }
+    fclose(in);
+    static char names[64][64];  // (the oldest beyond 3 removed: the names sort by date)
+    int nn = 0;
+    DIR *d = opendir(logs);
+    if (!d) return;
+    for (struct dirent *e; (e = readdir(d));)
+        if (nn < 64 && !strncmp(e->d_name, "crash-", 6) && strlen(e->d_name) < 64) snprintf(names[nn++], 64, "%s", e->d_name);
+    closedir(d);
+    qsort(names, (size_t)nn, sizeof names[0], session_log_name_cmp);
+    for (int i = 0; i + 3 < nn; i++) {
+        snprintf(to, sizeof to, "%s/%s", logs, names[i]);
+        unlink(to);
+    }
+}
+
 // stdout / stderr -> <dir>/lasrecomp.log (path_out: its path, emptied on failure).
 static void session_log_open(const char *dir, char *path_out, size_t n) {
     snprintf(path_out, n, "%s/lasrecomp.log", dir);
     bool append = getenv("LASRECOMP_LOG_APPEND") != NULL;
     if (!append) {
+        session_log_keep_crash(dir);
         session_log_backup(dir, "lasrecomp.prev.log");  // (the earlier macOS scheme's one backup)
         session_log_backup(dir, "lasrecomp.log");
         session_log_prune(dir);
