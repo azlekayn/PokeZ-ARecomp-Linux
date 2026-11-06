@@ -121,6 +121,10 @@ extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // 0: one buffer.
 extern uint32_t maxwell_gmem_chunk_shift;
 extern bool maxwell_gmem_lazy;
+// The fragment shaders' own derivatives (SHFL xor 1 / 2 into FSWZADD; translate.c quad_on, quad_deriv, quad_control_on),
+// set before the first translation by exec.c vk_exec_init: quad operations in fragment shaders, the hardware's
+// derivatives by default (AMD), quad control available and on by default (AMD)
+extern bool maxwell_quad_ops, maxwell_quad_deriv_default, maxwell_quad_control_ok, maxwell_quad_control_default;
 // Lazy mode, fragment: a shader without discard / depth output / stores declares early fragment tests (its GMiss
 // atomics would turn them off); one with discard / depth output (no stores) counts no misses - the
 // runtime imports the bound storage buffers' chunks before the draw. true (LARECOMP_VK_GMEM_FS_MISS=1): every shader
