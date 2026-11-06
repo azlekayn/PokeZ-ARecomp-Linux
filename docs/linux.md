@@ -16,9 +16,9 @@ its vertex cache, and textures re-checked only where the game wrote. Older kerne
 `[plat] no page write tracking: ...`); `LARECOMP_WRITE_TRACKING=0` turns it off.
 The start screen asks for the folder with your own game files and sets them up.
 
-Everything the app writes lives in `~/.local/share/lasrecomp` (`$XDG_DATA_HOME/lasrecomp`): game files (`extracted/`),
+Everything the app writes lives in `~/.local/share/pokemonza` (`$XDG_DATA_HOME/pokemonza`): game files (`extracted/`),
 saves, seeds, settings (`larecomp.ini`), shader caches, imported fonts. Started without a terminal the log is
-`~/.local/share/lasrecomp/lasrecomp.log`, always the latest run; up to five recent runs are kept as
+`~/.local/share/pokemonza/lasrecomp.log`, always the latest run; up to five recent runs are kept as
 `lasrecomp-backup-*.log` (from a terminal it prints there instead). `LARECOMP_DATA_ROOT=<dir>` uses
 another folder.
 
@@ -52,7 +52,7 @@ Then from the repo root:
     make -j         # -> build/lasrecomp and the game code library build/lasgame.so
 
 Run `./build/lasrecomp` from the repo root: with `extracted/` in the starting folder it uses that folder for
-everything (dev mode) instead of `~/.local/share/lasrecomp`.
+everything (dev mode) instead of `~/.local/share/pokemonza`.
 
 `ARCH` picks the target, separately from the OS: the generated code differs per arch (aarch64 runs the guest's
 FP/SIMD as inline asm, like Apple Silicon; x86-64 lowers it to C with `-march=x86-64-v3`, like Windows). `make gen`
@@ -116,13 +116,13 @@ The aarch64 AppImage is experimental: built on x86-64, only its start screen has
    `deviceName`, `driverName` and `driverInfo`.
 3. **What happened**: start screen? extraction? in game? where it stopped, any visual problems (screenshots help).
    With a controller: its model, and whether it works (the log names it: `[input] gamepad: ...`).
-4. **The log**: `~/.local/share/lasrecomp/lasrecomp.log` (or the terminal output when started from a terminal).
+4. **The log**: `~/.local/share/pokemonza/lasrecomp.log` (or the terminal output when started from a terminal).
    A crash writes `*** signal ...` and a backtrace there; attach the whole file (or if the problem was in
    an earlier run, that run's `lasrecomp-backup-*.log`, by date modified).
 5. **A crash backtrace with gdb** when the log's isn't enough:
 
        ./LAS.Recomp-<version>-linux-aarch64.AppImage --appimage-extract    # -> squashfs-root/
-       cd ~/.local/share/lasrecomp
+       cd ~/.local/share/pokemonza
        gdb -batch -ex 'handle SIGSEGV nostop noprint pass' -ex run -ex 'thread apply all bt 20' \
            --args ~/squashfs-root/usr/bin/lasrecomp > gdb.txt 2>&1
 

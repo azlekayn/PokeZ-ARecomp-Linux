@@ -12,7 +12,7 @@
 # screenshots in build/smoke/shots/. Exit status 0 = ready for release.
 # Uses this checkout's extracted/ (as the folder a player picks) and a test save that is never in git: $LARECOMP_SMOKE_SAVE (a save folder with
 # save_0/, default ~/.local/share/lasrecomp-smoketest/save). Make one by starting a new game once (any build, data
-# folder's save/) and copying that save/ there. Nothing in ~/.local/share/lasrecomp is used or changed.
+# folder's save/) and copying that save/ there. Nothing in ~/.local/share/pokemonza is used or changed.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 REPO=$PWD
