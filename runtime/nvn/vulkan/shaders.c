@@ -1022,6 +1022,10 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  if (!(dn > db + 1e-7)) discard;\n"  // (no water here: reversed depth, the nearer the larger)
                 "  mat4 vp = inverse(mat4(pc.m0, pc.m1, pc.m2, pc.m3));\n"
                 "  vec3 P = wpos(uv, dn);\n"
+                // (glossy floors too, on top of what's under them; water has depth. Nothing under it, db 0: water)
+                "  float under = 1.0;\n"
+                "  if (pc.cam.w > 0.0 && db > 0.0) under = smoothstep(pc.cam.w, pc.cam.w * 3.0, length(wpos(uv, db) - P));\n"
+                "  if (under <= 0.0) discard;\n"
                 // (window panes are drawn just like water, and being upright they'd be all mirror to the straight-up normal
                 // below: only what faces up or down gets a reflection. Each axis takes its nearer neighbour, so an edge
                 // doesn't tilt it)
@@ -1060,7 +1064,7 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  float edge = found * clamp(min(e.x, e.y) * 12.0, 0.0, 1.0);\n"
                 "  vec3 col = mix(textureLod(t3, R, 1.0).rgb, textureLod(t2, hit, 0.0).rgb, edge);\n"  // (off the picture: the game's reflection cube)
                 "  if (pc.prj.z != 0.0) { o = vec4(col, 1.0); return; }\n"
-                "  o = vec4(col, clamp(F * pc.prm.x, 0.0, 1.0));\n"
+                "  o = vec4(col, clamp(F * pc.prm.x * under, 0.0, 1.0));\n"
                 "}\n";
             size_t n = strlen(gtao_common) + strlen(body) + 1;
             src = malloc(n);

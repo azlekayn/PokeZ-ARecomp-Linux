@@ -9539,7 +9539,15 @@ static bool water_is_surface(Prog *pr) {
         return false;
     for (int i = 0; i < pr->fi->ntex; i++) {
         NvnTexEntry *e = gtao_tex_entry(pr->fi, i);
-        if (e && renderer_format_is_depth(e->tex->format)) return true;
+        if (e && renderer_format_is_depth(e->tex->format)) {
+            // (each shader taken for water, once: other things are drawn this way too - window panes, glossy floors)
+            static uint64_t seen[64];
+            static int ns;
+            bool known = false;
+            for (int k = 0; k < ns; k++) known |= seen[k] == g_cur_fs_hash;
+            if (!known && ns < 64) seen[ns++] = g_cur_fs_hash, LOG("[water] surface fs %016llx (%d textures)\n", (unsigned long long)g_cur_fs_hash, pr->fi->ntex);
+            return true;
+        }
     }
     return false;
 }
@@ -9600,6 +9608,9 @@ static void water_apply_pending(void) {
     pc[24] = pc[26] = (float)tb->width, pc[25] = pc[27] = (float)tb->height;
     pc[30] = gtao_env("LARECOMP_WATER_DEBUG", 0);
     pc[28] = gtao.fx, pc[29] = gtao.fy;  // (prj.xy, unused by this shader: where the picture ends in the image, for its rays)
+    // (cam.w: metres of depth under a surface before it reflects, full at 3x: a glossy floor is drawn like water, but
+    // right on top of the floor under it - the Pokemon Centers' mirror floors. LARECOMP_WATER_MIN_DEPTH=0: any surface)
+    pc[19] = gtao_env("LARECOMP_WATER_MIN_DEPTH", 0.05f);
     post_pc_big = pc;
     VkImageView in[4] = {dnow, dpre, cpre, probe};
     if (gtao.fx < 1 || gtao.fy < 1)  // (as the AO's apply: only the part the frame has)
