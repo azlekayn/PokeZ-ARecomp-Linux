@@ -21,6 +21,7 @@
 #include "../settings.h"
 #include "../ipc.h"
 #include "../romfs_build.h"
+#include "../za_music.h"
 
 #ifndef O_BINARY
 #define O_BINARY 0
@@ -635,6 +636,9 @@ static void prompt_patch(void) {
     LOG("[fs] button prompts: %d patches from %s\n", applied, path);
 }
 
+static ssize_t romfs_read(uint8_t *dst, uint64_t size, uint64_t off);
+static bool za_music_read(void *dst, uint64_t n, uint64_t off) { return romfs_read(dst, n, off) == (ssize_t)n; }
+
 static void rom_index(void) {
     uint64_t h[10];
     if (base_pread(h, sizeof h, 0) != (ssize_t)sizeof h) return;
@@ -707,6 +711,16 @@ static void rom_index(void) {
     free(dmeta);
     free(fmeta);
     LOG("[fs] romfs index: %d files\n", rom_nfiles);
+    if (trinity) {  // (Pokémon Z-A: its music streams, for runtime/hle/za_music.c. Reads go through romfs_read, ready now.)
+        uint64_t bo = 0, bs = 0, po[2] = {0, 0}, ps[2] = {0, 0};
+        for (int i = 0; i < rom_nfiles; i++) {
+            const RomFile *f = &rom_files[i];
+            if (!strcmp(f->path, "audio/wwise/bin/Switch/BGM.bnk")) bo = f->off, bs = f->size;
+            else if (!strcmp(f->path, "audio/wwise/bin/Switch/Stream.pck")) po[0] = f->off, ps[0] = f->size;
+            else if (!strcmp(f->path, "audio/wwise/bin/Switch/Stream_dlc.pck")) po[1] = f->off, ps[1] = f->size;
+        }
+        za_music_setup(za_music_read, bo, bs, po, ps);
+    }
 }
 
 // Virtual RomFS image read: original bytes, with the patched file table and appended replacement files.
@@ -758,6 +772,7 @@ static ssize_t romfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
                 uint64_t b = o + n < patches[k].off + patches[k].size ? o + n : patches[k].off + patches[k].size;
                 if (a < b) memcpy(dst + done + (a - o), patches[k].data + (a - patches[k].off), b - a);
             }
+            za_music_filter(o, dst + done, n);  // (Pokémon Z-A: the player's own music, runtime/hle/za_music.c)
         }
         done += n;
     }

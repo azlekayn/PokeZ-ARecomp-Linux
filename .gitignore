@@ -23,6 +23,7 @@ __pycache__/
 # texture dumps and HD packs (game art: users make their own)
 /textures/
 /mods/
+/music/
 /tools/hdtools/
 # Claude Code: machine-specific notes
 CLAUDE.local.md

@@ -38,6 +38,7 @@ extern "C" const char *rt_build_label(void);  // runtime/build_info.c (the menu 
 extern "C" {
 #include "../hle.h"
 #include "../settings.h"
+#include "../za_music.h"
 extern int g_game_is_la;  // runtime/kernel.c: Link's Awakening (its own tabs: randomizer, warp, cheats...)
 #include "menu.h"
 void input_reset(void);
@@ -868,6 +869,84 @@ static void tab_cosmetics(void) {
     opt_end();
 }
 
+// The songs under a folder, subfolders too: an album unpacks as album/MP3/*.mp3. (Paths that wouldn't fit
+// ZaMusicNow.file are left out: cut short, they'd name no file.)
+static void music_scan(const std::string &dir, int depth, std::vector<std::string> &out) {
+    DIR *d = opendir(dir.c_str());
+    if (!d) return;
+    while (struct dirent *e = readdir(d)) {
+        if (e->d_name[0] == '.') continue;
+        std::string p = dir + "/" + e->d_name;
+        struct stat st;
+        if (stat(p.c_str(), &st)) continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (depth < 4) music_scan(p, depth + 1, out);
+            continue;
+        }
+        const char *x = strrchr(e->d_name, '.');
+        if (!x || p.size() >= sizeof(ZaMusicNow::file)) continue;
+        for (const char *ok : {".mp3", ".flac", ".wav", ".ogg", ".opus", ".m4a"})
+            if (!strcasecmp(x, ok)) { out.push_back(p); break; }
+    }
+    closedir(d);
+}
+
+// Pokémon Z-A: the player's own music (runtime/hle/za_music.c): what plays now, and what to play in its place. The list
+// is music/ and mods/Music/, read again each second so a file dropped in meanwhile shows up. Each shows as its file
+// name without the folders or the extension.
+static void tab_music_rows(void) {
+    static std::vector<std::string> files, titles;
+    static int scanned = -1000;
+    if (ImGui::GetFrameCount() - scanned > 60) {
+        scanned = ImGui::GetFrameCount();
+        files.clear(), titles.clear();
+        music_scan("music", 0, files);
+        music_scan("mods/Music", 0, files);
+        std::sort(files.begin(), files.end());
+        for (auto &f : files) {
+            size_t a = f.rfind('/') + 1;
+            titles.push_back(f.substr(a, f.rfind('.') - a));
+        }
+    }
+    opt_section(TR("Music", "Música"));
+    ZaMusicNow now;
+    if (!za_music_now(&now)) {
+        ImGui::TextDisabled("%s", TR("No music has played yet. Songs go in the music or mods/Music folder (mp3, flac, wav, ogg).",
+                                     "Nenhuma música tocou ainda. As músicas ficam na pasta music ou mods/Music (mp3, flac, wav, ogg)."));
+        return;
+    }
+    char label[120];
+    snprintf(label, sizeof label, TR("Track %u (%d:%02d, %d stems)", "Faixa %u (%d:%02d, %d camadas)"), now.group,
+             (int)now.seconds / 60, (int)now.seconds % 60, now.stems);
+    std::vector<const char *> names;
+    names.push_back(TR("The game's own", "A do próprio jogo"));
+    names.push_back(TR("Silence", "Silêncio"));
+    int v = now.state == ZA_MUSIC_SILENCE ? 1 : 0;
+    for (size_t i = 0; i < files.size(); i++) {
+        if (now.file[0] && files[i] == now.file) v = (int)names.size();
+        names.push_back(titles[i].c_str());
+    }
+    const char *desc = now.state == ZA_MUSIC_PREPARING ? TR("Preparing the song: a few seconds. The game's own plays until then.",
+                                                            "Preparando a música: alguns segundos. A do jogo toca até lá.")
+                     : now.state == ZA_MUSIC_FAILED ? TR("This file can't be read, or isn't in the music folder any more. The game's own plays.",
+                                                         "Este arquivo não pode ser lido, ou não está mais na pasta music. A do jogo toca.")
+                     : TR("Replaces the track playing now, the next time the game reads it (a moment). Songs are in the "
+                          "music or mods/Music folder (mp3, flac, wav, ogg). The game's music volume still applies.",
+                          "Substitui a faixa que está tocando, na próxima leitura do jogo (um instante). As músicas ficam na "
+                          "pasta music ou mods/Music (mp3, flac, wav, ogg). O volume de música do jogo continua valendo.");
+    if (now.state == ZA_MUSIC_FAILED) opt_warn_next();
+    if (opt_choice(label, &v, names.data(), (int)names.size(), 0, desc))
+        za_music_assign(now.group, v == 0 ? NULL : v == 1 ? "-" : files[(size_t)v - 2].c_str());
+    int n = za_music_assigned_count();
+    if (n) {
+        char count[60];
+        snprintf(count, sizeof count, TR("%d replaced", "%d substituídas"), n);
+        if (opt_action(TR("Put every track back", "Restaurar todas as faixas"), count,
+                       TR("Every track of the game plays its own music again.", "Todas as faixas voltam a tocar a música do jogo.")))
+            za_music_clear_all();
+    }
+}
+
 static void tab_audio(void) {
     opt_begin("##audio", ImGui::GetFontSize() / 34);
     opt_section(TR("Sound", "Som"));
@@ -881,6 +960,7 @@ static void tab_audio(void) {
     opt_toggle(TR("Movie audio", "Som dos vídeos"), &g_settings.movie_audio, true,
                TR("Sound in the game's movies. Applies the next time a movie starts.",
                   "O som dos vídeos do jogo. Vale a partir do próximo vídeo."));
+    if (!g_game_is_la) tab_music_rows();
     opt_end();
 }
 
