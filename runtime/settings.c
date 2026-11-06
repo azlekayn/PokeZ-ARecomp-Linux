@@ -196,6 +196,7 @@ void settings_load(void) {
         else if (!strcmp(key, "hdr_paper_white_nits")) { int n = atoi(val); g_settings.hdr_paper = n < 80 ? 80 : n > 500 ? 500 : n; }
         else if (!strcmp(key, "present_mode")) g_settings.present_fifo = !strcmp(val, "fifo");
         else if (!strcmp(key, "aniso16")) g_settings.aniso16 = atoi(val) != 0;
+        else if (!strcmp(key, "performance_profile")) g_settings.perf_profile = !strcmp(val, "deck") ? 1 : !strcmp(val, "desktop") ? 2 : 0;
         else if (!strcmp(key, "operation_mode")) g_settings.opmode = !strcmp(val, "handheld") ? 2 : !strcmp(val, "docked") ? 1 : 0;
         else if (!strcmp(key, "dynamic_res")) g_settings.game_drs = !strcmp(val, "game");
         else if (!strcmp(key, "tex_hd")) g_settings.tex_hd = atoi(val) != 0;
@@ -323,6 +324,7 @@ void settings_save(void) {
     fprintf(f, "hdr_peak_nits = %d\n", g_settings.hdr_peak);
     fprintf(f, "hdr_paper_white_nits = %d\n", g_settings.hdr_paper);
     fprintf(f, "present_mode = %s\n", g_settings.present_fifo ? "fifo" : "mailbox");
+    fprintf(f, "performance_profile = %s\n", g_settings.perf_profile == 1 ? "deck" : g_settings.perf_profile == 2 ? "desktop" : "auto");
     fprintf(f, "operation_mode = %s\n", g_settings.opmode == 2 ? "handheld" : g_settings.opmode == 1 ? "docked" : "auto");
     fprintf(f, "dynamic_res = %s\n", g_settings.game_drs ? "game" : "off");
     fprintf(f, "tex_hd = %d\n", g_settings.tex_hd);
@@ -457,6 +459,18 @@ int settings_on_steam_deck(void) {
         FILE *f = fopen("/sys/class/dmi/id/sys_vendor", "r");
         if (f) { if (!fgets(v, sizeof v, f)) v[0] = 0; fclose(f); }
         deck = !strncmp(v, "Valve", 5);
+    }
+    return deck;
+}
+
+bool settings_profile_deck(void) {
+    static int deck = -1;
+    if (deck < 0) {
+        const char *e = getenv("LARECOMP_PERF_PROFILE");
+        int p = e ? (!strcmp(e, "deck") ? 1 : !strcmp(e, "desktop") ? 2 : 0) : g_settings.perf_profile;
+        deck = p ? p == 1 : settings_on_steam_deck() || g_gpu_integrated;
+        LOG("[settings] performance profile: %s (%s)\n", deck ? "deck" : "desktop",
+                e ? "LARECOMP_PERF_PROFILE" : p ? "chosen" : "auto");
     }
     return deck;
 }

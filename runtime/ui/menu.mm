@@ -555,6 +555,19 @@ static void tab_display(void) {
                 g_settings.game_drs = dr == 1;
         }
     }
+    {   // which machine's defaults the costly options take (settings_profile_deck): read once, at the start
+        extern bool g_za_frame_hook;
+        if (g_za_frame_hook) {
+            int pp = g_settings.perf_profile;
+            const char *pps[] = {TR("Auto", "Auto"), TR("Steam Deck", "Steam Deck"), TR("Desktop", "Desktop")};
+            if (opt_choice(TR("Performance profile", "Perfil de desempenho"), &pp, pps, 3, 0,
+                           TR("Which machine's defaults the costly options take. Auto: Steam Deck on a Deck or an integrated "
+                              "GPU, Desktop otherwise. Applies from the next start.",
+                              "Os padrões de qual máquina as opções pesadas usam. Auto: Steam Deck num Deck ou numa GPU "
+                              "integrada, Desktop nos outros. Vale a partir do próximo início.")))
+                g_settings.perf_profile = pp;
+        }
+    }
     {   // the mode the game is told it runs in (runtime/services/am.c): read when the game starts
         extern bool g_za_frame_hook;
         if (g_za_frame_hook) {

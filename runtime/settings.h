@@ -51,6 +51,7 @@ typedef struct {
     int hdr_peak;        // HDR: the brightest highlights, nits
     int hdr_paper;       // HDR: white in the HUD and menus, and the scene below its highlights, nits ("paper white")
     bool present_fifo;   // Frame pacing Smooth: FIFO presents, each frame shown on its own refresh (vulkan/device.c present_mode)
+    int perf_profile;  // performance_profile: 0 auto (settings_profile_deck), 1 deck, 2 desktop; read at the start
     int opmode;     // the mode the game is told it runs in (runtime/services/am.c): 0 auto (handheld on a Steam Deck), 1 docked (1080p), 2 handheld (720p)
     bool game_drs;  // Pokémon Z-A: its own dynamic resolution (else always full: runtime/nvn/vulkan/exec.c)
     int gtao;            // ambient occlusion (GTAO): 0 off, 1 low, 2 medium, 3 high (vulkan/exec.c)
@@ -148,6 +149,10 @@ void settings_save(void);
 // display. A player's own choice is kept. Anti-aliasing is off by default everywhere. LARECOMP_INTEGRATED=0/1 (test):
 // treat the GPU as dedicated / integrated.
 void settings_resolve_defaults(bool integrated);
+// Which machine's defaults the costly options take: the Deck's (true) or a desktop's, whatever the mode the game is told
+// it runs in. LARECOMP_PERF_PROFILE=deck/desktop, else performance_profile, else auto: a Steam Deck or an integrated GPU.
+// Only defaults: an option's own setting or LARECOMP_* variable still wins.
+bool settings_profile_deck(void);
 extern int g_default_upscaler;  // UPSCALE_*: what the menu shows as the default
 extern int g_default_res_mode;  // RES_*: likewise
 // An integrated GPU (as settings_resolve_defaults was told): the fixed 1x renders 1280x720 there, what the game itself

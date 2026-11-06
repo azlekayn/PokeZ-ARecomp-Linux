@@ -5294,7 +5294,7 @@ static uint32_t gfast_mask = 0xFFFF;
 static void gfast_prepare(VkCommandBuffer cb) {
     static int on = -1;
     // (on an integrated GPU the heap import is not across PCIe: the copy and the table search only cost, 234 -> 97 ms on a Steam Deck)
-    if (on < 0) { const char *e = ENV("LARECOMP_VK_GMEM_FAST"); on = e ? atoi(e) != 0 : g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU; }
+    if (on < 0) { const char *e = ENV("LARECOMP_VK_GMEM_FAST"); on = e ? atoi(e) != 0 : !settings_profile_deck(); }  // (the profile: a Steam Deck or an integrated GPU, or as chosen)
     memset(gmap_tab, 0, sizeof gmap_tab);
     gfast_n = 0;
     if (!gc_lazy) gmem_info();  // (the heap import, made on first use)
@@ -9272,13 +9272,31 @@ static void gtao_before_lighting(Prog *pr) {
         gtao.fy = fminf(1, (vp[1] + vp[3]) / (float)de->tex->height);
     }
     if (!gtao_on()) { gtao.ao = VK_NULL_HANDLE; return; }
+    // the G-buffer's normals for the march (t2): the lighting's first RGBA8 texture at the depth's size, after its two
+    // depth reads. LARECOMP_GTAO_GBUF_NORMALS=0: the normals from the depth, as before
+    VkImageView nv = VK_NULL_HANDLE;
+    if (gtao_env("LARECOMP_GTAO_GBUF_NORMALS", 1) != 0)
+        for (int i = 2; i < pr->fi->ntex && !nv; i++) {
+            NvnTexEntry *e = gtao_tex_entry(pr->fi, i);
+            if (e && e->tex->format == 0x25 && e->tex->width == de->tex->width && e->tex->height == de->tex->height)
+                nv = vk_view(e->tex, &e->view, e->has_view, false, pr->fi->tex[i].type);
+        }
+    // prm.w: its sign says whether those normals are there; its size is the widest the AO radius gets on screen, as a
+    // fraction of the width (LARECOMP_GTAO_MAXR; 0: no limit)
+    float maxr = gtao_env("LARECOMP_GTAO_MAXR", 0.2f);
+    if (maxr <= 0) maxr = 1000.0f;
+    pc[23] = nv ? maxr : -maxr;
+    // a second pass of the filter (back into the raw image): the few steps of a wide radius leave blotches a single
+    // 5x5 pass doesn't smooth. A GPU cost, so off in the Deck's profile (settings_profile_deck); LARECOMP_GTAO_BLUR2=0/1
+    bool blur2 = gtao_env("LARECOMP_GTAO_BLUR2", settings_profile_deck() ? 0 : 1) != 0 && pc[30] < 2;
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     TexBackend *raw = post_image(6, aw, ah), *filt = post_image(7, aw, ah);
     post_pc_big = pc;
-    VkImageView in[2] = {dv, dv};
-    // (margins: the filter reads 2 texels around, the upsample 1 - raw covers both)
-    if (gtao.fx < 1 || gtao.fy < 1) post_area_w = (uint32_t)ceilf(aw * gtao.fx) + 4, post_area_h = (uint32_t)ceilf(ah * gtao.fy) + 4;
+    VkImageView in[3] = {dv, dv, nv ? nv : dv};
+    // (margins: each filter pass reads 2 texels around, the upsample 1 - raw covers them)
+    uint32_t margin = blur2 ? 6 : 4;
+    if (gtao.fx < 1 || gtao.fy < 1) post_area_w = (uint32_t)ceilf(aw * gtao.fx) + margin, post_area_h = (uint32_t)ceilf(ah * gtao.fy) + margin;
     // The march's taps (4 x slices^2 a pixel) at scattered places in the full-size depth: cache misses, as SSGI's
     // (ssgi_apply). A half-size copy of the depth (gtao_down, R32F) for them - the point and its normal still read
     // the full size. pc[19] (cam.w, unused): the copy's last texel written, x * 2048 + y. LARECOMP_GTAO_HALF=0
@@ -9290,14 +9308,19 @@ static void gtao_before_lighting(Prog *pr) {
         uint32_t lx = (post_area_w && post_area_w < aw ? post_area_w : aw) - 1, ly = (post_area_h && post_area_h < ah ? post_area_h : ah) - 1;
         pc[19] = (float)(lx * 2048 + ly);
         in[1] = post_view(hd);
-        post_pass(cb, "gtao_h.frag", in, 2, raw, NULL, false);
-    } else post_pass(cb, "gtao.frag", in, 1, raw, NULL, false);
+        post_pass(cb, "gtao_h.frag", in, 3, raw, NULL, false);
+    } else post_pass(cb, "gtao.frag", in, 3, raw, NULL, false);
     VkImageView bin[2] = {post_view(raw), dv};
     if (gtao.fx < 1 || gtao.fy < 1) post_area_w -= 2, post_area_h -= 2;
     post_pass(cb, "gtao_blur.frag", bin, 2, filt, NULL, false);
+    if (blur2) {
+        VkImageView bin2[2] = {post_view(filt), dv};
+        if (gtao.fx < 1 || gtao.fy < 1) post_area_w -= 2, post_area_h -= 2;
+        post_pass(cb, "gtao_blur.frag", bin2, 2, raw, NULL, false);
+    }
     post_area_w = post_area_h = 0;
     post_pc_big = NULL;
-    gtao.ao = pc[30] >= 2 ? post_view(raw) : post_view(filt);  // (debug views 2 / 3: unfiltered)
+    gtao.ao = pc[30] >= 2 || blur2 ? post_view(raw) : post_view(filt);  // (debug views 2 / 3: unfiltered)
     gtao.depth = dv;
     static int nlog;
     if (nlog++ < 2) LOG("[gtao] on: depth %ux%u, AO %ux%u (shaded %.0f%% x %.0f%%), radius %.2f m, camera (%.1f, %.1f, %.1f)\n", db->width,
