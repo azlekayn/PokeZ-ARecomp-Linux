@@ -35,6 +35,9 @@ Machine-specific paths (game files, install folder) are in `CLAUDE.local.md` whe
   (`cache/shader_seen.txt`) and its shader code (`cache/shader_code.bin`, the player's own data, never shipped), and
   prepares them at its GPU device setup (`shader_prep_boot`, ~0.2 s warm; `LARECOMP_SHADER_PREP=0` off). Not from the
   start screen: before boot the guest memory window is Zelda's and the translations would bake the wrong one in.
+- `runtime/saveserv.cpp`, `runtime/ui/saveserv_ui.mm`: save sync through the player's own SaveServ server (off until paired;
+  both ways on the start screen, uploads only while the game runs). Test: `SAVESERV_PY=<SaveServ>/server/saveserv.py
+  tools/test_saveserv.sh` (a throwaway server, two devices).
 - `runtime/crash_explain.c`: the crash dialog's plain-language explanation.
 - `runtime/nvn/vulkan/device.c`: present, `[mem]` and `[scale]` log lines, screenshots.
 - `runtime/nvn/maxwell/translate.c`: Maxwell shader -> GLSL/MSL.

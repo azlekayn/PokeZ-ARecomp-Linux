@@ -2454,6 +2454,8 @@ int ui_run(void) {
                 input_rumble_stop();
                 input_led_stop();
                 LOG("window closed\n");
+                extern void saveserv_flush(int max_ms);  // (runtime/saveserv.cpp: a save not sent yet, at most 5 s)
+                saveserv_flush(5000);
                 backend_quit();  // (before exit(): see there)
                 exit(0);
             }

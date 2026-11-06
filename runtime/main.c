@@ -173,10 +173,14 @@ void backend_guest_memory_reset(void);  // renderer: guest memory was replaced (
 void backend_clear_window(void);      // a black frame while the game is down
 void backend_quit(void);              // quitting: the render thread stopped, the GPU idle, caches kept (before exit())
 
+void saveserv_flush(int max_ms);        // runtime/saveserv.cpp
+void saveserv_game_starting(void);
+void saveserv_game_stopped(void);
+
 static void reboot_idle(void) {  // (main thread, while guest threads stop) keep the window alive
     SDL_Event e;
     while (SDL_PollEvent(&e))
-        if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); backend_quit(); exit(0); }
+        if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); saveserv_flush(5000); backend_quit(); exit(0); }
 }
 
 static void teardown(void) {
@@ -360,9 +364,11 @@ int main(int argc, char **argv) {
             extern void launcher_run(const char *root);
             launcher_run(root);
         }
+        saveserv_game_starting();  // (runtime/saveserv.cpp: from here until the game is down, saves are only uploaded)
         boot(root);
         int kind = ui_run();  // window and input on the main thread; returns when a reboot is requested
         teardown();
+        saveserv_game_stopped();
         title = kind == RT_REBOOT_TITLE;
     }
 }

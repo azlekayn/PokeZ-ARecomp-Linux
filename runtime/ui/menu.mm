@@ -42,6 +42,7 @@ extern int g_game_is_la;  // runtime/kernel.c: Link's Awakening (its own tabs: r
 #include "menu.h"
 void input_reset(void);
 void save_editor_draw(float scale);  // save_editor.mm
+void saveserv_panel_draw(float scale);  // saveserv_ui.mm
 extern "C" int game_in_play(void);  // hle/warp.c
 void save_editor_on_open(void);
 void rando_tab_draw(float scale);
@@ -1217,10 +1218,10 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     if (prelaunch) tabs[ntabs++] = {TR("Files", "Arquivos"), -1, true};
     if (!menu_la_tabs) {
         const char *names[] = {TR("Controls", "Controles"), TR("Video", "Vídeo"), TR("Audio", "Áudio"), TR("Game", "Jogo"),
-                               "Mods", TR("Quit", "Sair")};
-        static const int ids[] = {8, 0, 1, 10, 11, 9};
-        for (int i = 0; i < 6; i++)
-            if (ids[i] != 9 || !prelaunch) tabs[ntabs++] = {names[i], ids[i], true};
+                               "Mods", "Saves", TR("Quit", "Sair")};
+        static const int ids[] = {8, 0, 1, 10, 11, 12, 9};
+        for (int i = 0; i < 7; i++)  // (Saves: the start screen has its own page; Quit: its own button)
+            if ((ids[i] != 9 && ids[i] != 12) || !prelaunch) tabs[ntabs++] = {names[i], ids[i], true};
     } else {
         static const char *names[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Gameplay",
                                       "Cosmetics", "Controls", "Quit"};
@@ -1345,6 +1346,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 case 9: tab_quit(scale, in_game); break;
                 case 10: tab_game(); break;
                 case 11: tab_mods(scale, in_game); break;
+                case 12: saveserv_panel_draw(scale); break;
                 }
                 static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
                 if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));

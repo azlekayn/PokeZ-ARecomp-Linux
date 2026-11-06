@@ -32,6 +32,8 @@
 #include "imgui_impl_vulkan.h"
 #endif
 #include "imgui_impl_sdl3.h"
+#include "saveserv.h"
+extern "C" void saveserv_panel_draw(float scale);  // saveserv_ui.mm
 
 extern "C" {
 #include "platform.h"
@@ -2014,6 +2016,7 @@ extern "C" void launcher_run(const char *root) {
         pthread_t t;
         if (pthread_create(&t, NULL, update_thread, NULL) == 0) pthread_detach(t);
     }
+    saveserv_kick();  // (runtime/saveserv.cpp: nothing unless this device was paired; also after a return from the game)
     ui_window_init();
     SDL_Window *win = ui_window();
     g_launcher_win = win;
@@ -2277,6 +2280,12 @@ extern "C" void launcher_run(const char *root) {
             const char *tab_names[N_TABS] = {TR("Play", "Jogar"), TR("Mods", "Mods"), TR("Saves", "Saves"),
                                              TR("Settings", "Configurações"), TR("About", "Sobre")};
             float tx = lx + fmaxf(70, vw + 22);  // (the pages after the version: a longer "-b<N>" one pushes them along)
+            {  // a sync conflict is a question: shown once when it comes up, wherever the player is
+                static bool conflict_shown;
+                bool conflict = saveserv_status().state == SAVESERV_CONFLICT;
+                if (conflict && !conflict_shown) g_tab = TAB_SAVES;
+                conflict_shown = conflict;
+            }
             int prev_tab = g_tab;
             for (int i = 0; i < N_TABS; i++) {
                 float tw = text_size(F_LABEL, 15, tab_names[i]).x + 32;
@@ -2680,12 +2689,28 @@ extern "C" void launcher_run(const char *root) {
                     text(dl, F_BODY, 14, x + 26, ly, g_save_failed ? C_RED : C_GREEN, g_save_msg.c_str(), cw - 52);
 
                 float rx = x + cw + gap;
-                panel(dl, rx, y, cw, h);
-                ImVec2 bt = text(dl, F_H2, 24, rx + 26, y + 22, C_TEXT, TR("Backups", "Backups"));
-                text(dl, F_BODY, 13, rx + 36 + bt.x, y + 22 + bt.y - text_size(F_BODY, 13, "A").y - 4, C_MUTED,
-                     TR("made on their own before an import or a restore", "feitos sozinhos antes de importar ou restaurar"));
-                ImGui::SetCursorScreenPos(P(rx + 20, y + 30 + bt.y));
-                ImGui::BeginChild("##backups", S(cw - 40, h - 46 - bt.y - 34), 0, ImGuiWindowFlags_NavFlattened);
+                // save sync with the player's own server (runtime/saveserv.cpp, its panel: runtime/ui/saveserv_ui.mm)
+                const float sync_h = saveserv_status().state == SAVESERV_CONFLICT ? 292 : 196;  // (its question and buttons)
+                panel(dl, rx, y, cw, sync_h);
+                text(dl, F_H2, 24, rx + 26, y + 16, C_TEXT, TR("Sync", "Sincronizar"));
+                ImGui::SetCursorScreenPos(P(rx + 26, y + 54));
+                ImGui::BeginChild("##saveserv", S(cw - 52, sync_h - 62), 0, ImGuiWindowFlags_NavFlattened);
+                ImGui::PushFont(g_font_small);
+                saveserv_panel_draw(g_s);
+                ImGui::PopFont();
+                ImGui::EndChild();
+                {
+                    static uint32_t seen_downloads;  // a download put a backup here and changed the save
+                    uint32_t d = saveserv_status().downloads;
+                    if (d != seen_downloads) seen_downloads = d, g_save_scanned = false;
+                }
+                float by = y + sync_h + 14, bh = h - sync_h - 14;
+                panel(dl, rx, by, cw, bh);
+                ImVec2 bt = text(dl, F_H2, 24, rx + 26, by + 18, C_TEXT, TR("Backups", "Backups"));
+                text(dl, F_BODY, 13, rx + 36 + bt.x, by + 18 + bt.y - text_size(F_BODY, 13, "A").y - 4, C_MUTED,
+                     TR("made on their own before an import, a restore or a sync", "feitos sozinhos antes de importar, restaurar ou sincronizar"));
+                ImGui::SetCursorScreenPos(P(rx + 20, by + 26 + bt.y));
+                ImGui::BeginChild("##backups", S(cw - 40, bh - 40 - bt.y), 0, ImGuiWindowFlags_NavFlattened);
                 ImDrawList *cl = ImGui::GetWindowDrawList();
                 static std::string confirm_dir;
                 if (g_backups.empty()) {
