@@ -38,6 +38,7 @@ extern "C" const char *rt_build_label(void);  // runtime/build_info.c (the menu 
 extern "C" {
 #include "../hle.h"
 #include "../settings.h"
+#include "../za_audio.h"
 #include "../za_music.h"
 extern int g_game_is_la;  // runtime/kernel.c: Link's Awakening (its own tabs: randomizer, warp, cheats...)
 #include "menu.h"
@@ -980,6 +981,15 @@ static void tab_audio(void) {
                    TR("The game's volume. 100% is the game's own level; above it, louder.",
                       "O volume do jogo. 100% é o nível do próprio jogo; acima disso, mais alto.")))
         g_settings.volume = pct / 100.0f;
+    if (!g_game_is_la && za_audio_ready()) {  // (the game's own options, as in its menu: only down from its full level)
+        const char *names[ZA_AUDIO_N] = {TR("Music", "Música"), TR("Sound effects", "Efeitos sonoros"), TR("Pokémon cries", "Gritos dos Pokémon")};
+        const char *desc = TR("The game's own setting, the same as in its options menu. Saved when the game saves its options.",
+                              "A opção do próprio jogo, a mesma do menu de opções dele. Salva quando o jogo salva as opções.");
+        for (int i = 0; i < ZA_AUDIO_N; i++) {
+            float v = (float)za_audio_get(i);
+            if (opt_slider(names[i], &v, 0, 10, 1, 10, "%g", desc)) za_audio_set(i, (int)v);
+        }
+    }
     opt_toggle(TR("Room reverb", "Eco dos ambientes"), &g_settings.reverb, true,
                TR("The game's echo in caves, buildings and big rooms.", "O eco do jogo em cavernas, prédios e salas grandes."));
     opt_toggle(TR("Movie audio", "Som dos vídeos"), &g_settings.movie_audio, true,
