@@ -181,6 +181,11 @@ extern "C" bool vk_fsr3_record(VkPhysicalDevice phys, VkDevice dev, VkCommandBuf
     d.cameraFar = FLT_MAX;
     d.cameraFovAngleVertical = f->fov_y;
     d.viewSpaceToMetersFactor = 1;
+    // (debug) LARECOMP_FSR3_DEBUG=1: AMD's own view over the picture, what it makes of the inputs - top row: dilated motion
+    // vectors, protected areas, dilated depth in metres; bottom row: disocclusion, reactiveness, detail protection takedown
+    static int debug_view = -1;
+    if (debug_view < 0) debug_view = getenv("LARECOMP_FSR3_DEBUG") && atoi(getenv("LARECOMP_FSR3_DEBUG")) ? 1 : 0;
+    if (debug_view) d.flags |= FFX_FSR3UPSCALER_DISPATCH_DRAW_DEBUG_VIEW;
     FfxErrorCode e = ffxFsr3UpscalerContextDispatch(&ctx, &d);
     if (e != FFX_OK) {
         static int n;
