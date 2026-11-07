@@ -9073,9 +9073,18 @@ static bool fsr2_copy(Prog *pr) {
                       .color_format = sb->format, .depth_format = zb->format, .out_format = VK_FORMAT_R8G8B8A8_UNORM,
                       .w = w, .h = h, .iw = sb->width, .ih = sb->height, .ow = ow, .oh = oh, .jx = fsr2_jx, .jy = fsr2_jy, .dt_ms = fminf(fmaxf(dt, 1), 100),
                       .near_z = 0.1f, .fov_y = mv_tanfovy > 0 ? 2 * atanf(mv_tanfovy) : 1.0f, .sharpness = 0, .reset = reset};
+    // FSR 3.1 or FSR 2 (F1 > Temporal anti-aliasing; LARECOMP_FSR3=0 / 1 overrides): the same inputs. FSR 3 failing once
+    // (a driver without something its backend wants, logged) means FSR 2 from the next frame on, for the session: that
+    // frame shows the game's own copy, as nothing of a half-recorded dispatch may run. A change starts its history anew.
+    static int fsr3_env = -2, taa_last = -1;
+    static bool fsr3_broken;
+    if (fsr3_env == -2) fsr3_env = ENV("LARECOMP_FSR3") ? atoi(ENV("LARECOMP_FSR3")) != 0 : -1;
+    bool use3 = (fsr3_env >= 0 ? fsr3_env != 0 : g_settings.taa_fsr3) && !fsr3_broken;
+    if (taa_last != (int)use3) fr.reset = true, reset = true, taa_last = (int)use3;
     VkCommandBuffer sec = fsr2_cmd();
-    bool ok = vk_fsr2_record(g_vk.phys, g_vk.dev, sec, &fr);
+    bool ok = use3 ? vk_fsr3_record(g_vk.phys, g_vk.dev, sec, &fr) : vk_fsr2_record(g_vk.phys, g_vk.dev, sec, &fr);
     VK_CHECK(vkEndCommandBuffer(sec));
+    if (!ok && use3) fsr3_broken = true, LOG("[fsr3] not available: FSR 2 from the next frame\n");
     if (!ok) return false;
     // (the shown image's first pass this frame is now the HUD's: a target's first pass in a frame clears it -
     // renderer_texture_frame_fresh - which would wipe the copy below. Taken as done here.)
@@ -9099,7 +9108,7 @@ static bool fsr2_copy(Prog *pr) {
     static int nlog;
     static uint32_t last_w;  // (and each change of the render size)
     if (nlog++ < 3 || w != last_w)
-        LOG("[fsr2] frame %llu: %ux%u -> %ux%u, jitter %.3f %.3f%s\n", (unsigned long long)f, w, h, ow, oh, fsr2_jx, fsr2_jy,
+        LOG("[fsr%d] frame %llu: %ux%u -> %ux%u, jitter %.3f %.3f%s\n", use3 ? 3 : 2, (unsigned long long)f, w, h, ow, oh, fsr2_jx, fsr2_jy,
             reset ? ", reset" : "");
     last_w = w;
     fsr2_ok_frame = f;

@@ -750,16 +750,18 @@ static void tab_display(void) {
                   "Muda na hora."));
 #ifndef __APPLE__
     if (!la) {  // (runtime/nvn/vulkan/exec.c fsr2_copy: applies at once)
-        int t = g_settings.taa ? 1 : 0;
-        const char *taa[] = {TR("Game's", "Do jogo"), "AMD FSR 2"};
-        if (opt_choice(TR("Temporal anti-aliasing", "Anti-aliasing temporal"), &t, taa, 2, 0,
-                       TR("AMD FSR 2 in place of the game's own edge smoothing: it combines several frames, so fences, "
+        int t = !g_settings.taa ? 0 : g_settings.taa_fsr3 ? 2 : 1;
+        const char *taa[] = {TR("Game's", "Do jogo"), "AMD FSR 2", "AMD FSR 3"};
+        if (opt_choice(TR("Temporal anti-aliasing", "Anti-aliasing temporal"), &t, taa, 3, 0,
+                       TR("AMD FSR in place of the game's own edge smoothing: it combines several frames, so fences, "
                           "railings, leaves and thin lines stay smooth and stop flickering as you move. Uses a little GPU "
-                          "time. With it on, Anti-aliasing (SMAA) above isn't needed.",
-                          "AMD FSR 2 no lugar da suavização de bordas do próprio jogo: ele combina vários quadros, então "
+                          "time, FSR 3 a little more than FSR 2 and with less ghosting. With it on, Anti-aliasing (SMAA) "
+                          "above isn't needed.",
+                          "AMD FSR no lugar da suavização de bordas do próprio jogo: ele combina vários quadros, então "
                           "grades, corrimões, folhas e linhas finas ficam lisos e param de tremular quando você anda. Usa um "
-                          "pouco da GPU. Com ele ligado, o Anti-aliasing (SMAA) acima não é necessário.")))
-            g_settings.taa = t == 1;
+                          "pouco da GPU, o FSR 3 um pouco mais que o FSR 2 e com menos rastros. Com ele ligado, o "
+                          "Anti-aliasing (SMAA) acima não é necessário.")))
+            g_settings.taa = t != 0, g_settings.taa_fsr3 = t == 2;
         if (g_settings.taa) {  // (exec.c vk_taa_render_share: applies at once)
             // AMD's FSR modes (Native AA, Quality 1.5x, Balanced 1.7x, Performance 2x; not Ultra Performance's 3x:
             // temporal_aa_render keeps 50-100). An ini value between them shows as the nearest, kept until a pick.

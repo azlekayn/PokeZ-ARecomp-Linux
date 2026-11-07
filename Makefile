@@ -187,6 +187,34 @@ $(B)/fsr2/%.o: third_party/fsr2/%.cpp
 	$(CXX) $(CXXFLAGS) -DFFX_GCC -include stddef.h -Wno-absolute-value -c $< -o $@
 $(B)/rt/nvn/vulkan/fsr2.o: CXXFLAGS += -DFFX_GCC -include stddef.h  # (the SDK's headers: FFX_API, size_t)
 
+# AMD FSR 3.1's upscaler (third_party/fsr3, FidelityFX SDK v1.1.4, MIT), built like FSR 2 above. One object out of it all
+# with its own functions renamed fsr3_*, vk_fsr3_* aside: the SDK and third_party/fsr2 define many of the same. (Renamed,
+# not made local: the C++ templates it shares with the rest of the game are COMDAT groups, and a local copy of one
+# whose group the linker throws away for another object's leaves references to a discarded section.)
+FSR3_SHADERS := $(wildcard third_party/fsr3/shaders/*.glsl third_party/fsr3/include/FidelityFX/gpu/*.h third_party/fsr3/include/FidelityFX/gpu/*/*.h)
+$(B)/inc/fsr3_shaders.inc: $(FSR3_SHADERS)
+	@mkdir -p $(dir $@)
+	for f in $(FSR3_SHADERS); do echo "{\"$$(basename $$f)\","; LC_ALL=C tr -d '\r' < $$f | LC_ALL=C tr '\200-\377' '?' | \
+	  sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/'; echo "},"; done > $@
+FSR3_SRC := third_party/fsr3/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp third_party/fsr3/src/backends/vk/ffx_vk.cpp \
+            third_party/fsr3/src/shared/ffx_assert.cpp third_party/fsr3/src/shared/ffx_breadcrumbs_list.cpp \
+            third_party/fsr3/src/shared/ffx_message.cpp third_party/fsr3/src/shared/ffx_object_management.cpp \
+            third_party/fsr3/za/vk_fsr3.cpp third_party/fsr3/za/fsr3_shaders.cpp
+FSR3_PARTS := $(patsubst third_party/fsr3/%.cpp,$(B)/fsr3/%.o,$(FSR3_SRC))
+FSR3_CXXFLAGS := -DFFX_GCC -include third_party/fsr3/za/za_compat.h -Ithird_party/fsr3/include -Ithird_party/fsr3/include/FidelityFX/gpu \
+                 -Ithird_party/fsr3/src/backends/shared -Ithird_party/fsr3/src/shared -I$(B)/inc -Wno-absolute-value
+$(B)/fsr3/%.o: third_party/fsr3/%.cpp third_party/fsr3/za/za_compat.h $(B)/inc/fsr3_shaders.inc
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(FSR3_CXXFLAGS) -c $< -o $@
+# (the LLVM tools when there are some: they read any target's objects, a cross build's too)
+OBJCOPY ?= $(or $(shell command -v llvm-objcopy 2>/dev/null),objcopy)
+NM ?= $(or $(shell command -v llvm-nm 2>/dev/null),nm)
+FSR3_OBJ := $(B)/fsr3/vk_fsr3_all.o
+$(FSR3_OBJ): $(FSR3_PARTS)
+	$(CXX) -r -nostdlib -o $@ $^
+	$(NM) -g --defined-only $@ | awk '$$2 ~ /^[TDBRS]$$/ && $$3 !~ /^vk_fsr3_/ { print $$3, "fsr3_" $$3 }' > $@.syms
+	$(OBJCOPY) --redefine-syms=$@.syms $@
+
 # The shader preparation's variant list (runtime/nvn/shader_prep.h: no shader code, hashes and pipeline state only)
 # as a C string for runtime/nvn/shader_prep.c
 $(B)/inc/shader_variants.inc: runtime/nvn/shader_variants.txt
@@ -212,7 +240,7 @@ $(B)/rt/%.o: runtime/%.m $(RT_HDRS)
 # linked to a temp file, then renamed over: a copy of the game still running keeps its (old) file - relinking in
 # place gets running copies killed by macOS (code signature of the changed pages). The temp file keeps the real name
 # (in a folder of its own): on Windows the import library records the name the game code library loads it by.
-$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(if $(filter %vulkan/exec.o,$(BACKEND_OBJ)),$(FSR2_OBJ))
+$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(if $(filter %vulkan/exec.o,$(BACKEND_OBJ)),$(FSR2_OBJ) $(FSR3_OBJ))
 	@mkdir -p $(dir $@)link
 	$(CXX) -o $(dir $@)link/$(notdir $@) $^ $(LDFLAGS)
 	mv -f $(dir $@)link/$(notdir $@) $@

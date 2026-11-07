@@ -27,6 +27,9 @@ bool vk_fsr2_record(VkPhysicalDevice phys, VkDevice dev, VkCommandBuffer cmd, co
 // The jitter of frame `index` for this render / output width: FSR 2's own Halton sequence, in render pixels
 void vk_fsr2_jitter(uint32_t index, uint32_t render_w, uint32_t out_w, float *jx, float *jy);
 void vk_fsr2_destroy(VkDevice dev);
+// AMD FSR 3.1's upscaler (third_party/fsr3/za/vk_fsr3.cpp): the same frame, the same jitter sequence as FSR 2's
+bool vk_fsr3_record(VkPhysicalDevice phys, VkDevice dev, VkCommandBuffer cmd, const VkFsr2Frame *f);
+void vk_fsr3_destroy(VkDevice dev);
 
 #ifdef __cplusplus
 }
