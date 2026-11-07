@@ -202,7 +202,7 @@ FSR3_SRC := third_party/fsr3/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp th
             third_party/fsr3/za/vk_fsr3.cpp third_party/fsr3/za/fsr3_shaders.cpp
 FSR3_PARTS := $(patsubst third_party/fsr3/%.cpp,$(B)/fsr3/%.o,$(FSR3_SRC))
 FSR3_CXXFLAGS := -DFFX_GCC -include third_party/fsr3/za/za_compat.h -Ithird_party/fsr3/include -Ithird_party/fsr3/include/FidelityFX/gpu \
-                 -Ithird_party/fsr3/src/backends/shared -Ithird_party/fsr3/src/shared -I$(B)/inc -Wno-absolute-value
+                 -Ithird_party/fsr3/src/backends/shared -Ithird_party/fsr3/src/shared -I$(B)/inc
 $(B)/fsr3/%.o: third_party/fsr3/%.cpp third_party/fsr3/za/za_compat.h $(B)/inc/fsr3_shaders.inc
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(FSR3_CXXFLAGS) -c $< -o $@

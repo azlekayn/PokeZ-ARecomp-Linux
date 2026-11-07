@@ -163,7 +163,9 @@ typedef union Fsr3UpscalerSecondaryUnion {
 // Lanczos
 static float lanczos2(float value)
 {
-    return abs(value) < FFX_EPSILON ? 1.f : (sinf(FFX_PI * value) / (FFX_PI * value)) * (sinf(0.5f * FFX_PI * value) / (0.5f * FFX_PI * value));
+    // ZA Recomp: fabsf - a bare abs() was the integer one outside MSVC (as in third_party/fsr2): everything under 1 came out
+    // as weight 1, and the history, filtered through this table, sat half a pixel off and blurred - less so once it moved
+    return fabsf(value) < FFX_EPSILON ? 1.f : (sinf(FFX_PI * value) / (FFX_PI * value)) * (sinf(0.5f * FFX_PI * value) / (0.5f * FFX_PI * value));
 }
 
 // Calculate halton number for index and base.
