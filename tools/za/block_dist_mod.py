@@ -6,7 +6,7 @@
 # mods/MaxLOD don't touch it. Here the distances are multiplied (--scale, default 1.5) in place, so the file keeps its
 # size and layout: the entity's 180 m, and the area's 200 m box with its 205 m way out. All of them together: 180 is under
 # 200 so that the real block has loaded before the merged one goes, and scaling only one could leave holes.
-# What each number does was worked out from the data and one test, not from a format description.
+# What each number does is read from the data, not from a format description, and not yet confirmed in game.
 # Costs GPU time and memory: more real buildings loaded and drawn. Drop the folder (or rename it _BlockDistance) to go back.
 # usage (from the checkout): python tools/za/block_dist_mod.py --ooz <ooz.dll/.so> [--romfs extracted/romfs]
 #   [--out mods/BlockDistance] [--scale 1.5]
