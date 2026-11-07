@@ -6,7 +6,11 @@
 # mods/MaxLOD don't touch it. Here the distances are multiplied (--scale, default 1.5) in place, so the file keeps its
 # size and layout: the entity's 180 m, and the area's 200 m box with its 205 m way out. All of them together: 180 is under
 # 200 so that the real block has loaded before the merged one goes, and scaling only one could leave holes.
-# What each number does is read from the data, not from a format description, and not yet confirmed in game.
+# What each number does is read from the data, not from a format description.
+# WARNING: --scale 1.5 BROKE THE WORLD in game (2026-11-07, desktop): fine at first, then on reaching a part of the city
+# with more blocks in range the ground and buildings went untextured and the player disappeared, at a steady 60 fps with
+# nothing in the log. It looks like a fixed limit on what can be streamed in at once (not proven). The game also autosaved
+# during that run. Back up the save before trying any scale, and don't take this mod as safe.
 # Costs GPU time and memory: more real buildings loaded and drawn. Drop the folder (or rename it _BlockDistance) to go back.
 # usage (from the checkout): python tools/za/block_dist_mod.py --ooz <ooz.dll/.so> [--romfs extracted/romfs]
 #   [--out mods/BlockDistance] [--scale 1.5]
