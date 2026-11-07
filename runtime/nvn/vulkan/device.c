@@ -1803,7 +1803,12 @@ void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h) 
 // ================================================================== game presentation (metal.m backend_present)
 // Draws the game's image into the window with the widescreen crop, then the overlay menu.
 extern void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]);
-extern bool g_debug_frame;  // (exec.c; set in present_hooks, read in the render thread's present)
+extern bool g_debug_frame;  // (exec.c; set in the render thread's present, read by its translation)
+// F9 / LARECOMP_DEBUG_FRAME: the game frame to dump, and how many (LARECOMP_DEBUG_FRAMES). The switch itself flips in the
+// render thread's present, not the game thread's: the render thread runs behind, so a one-frame window on the game
+// thread's clock is ~16 ms of wall time wherever the render thread happens to be, and saving images only slows it
+// further. On Z-A that was the shadow atlas's first few 64x64 passes and never a scene pass.
+static volatile long debug_at = -1, debug_n = -1;
 void renderer_submit(void);
 void renderer_set_scale(float sx, float sy);
 uint64_t renderer_present_count(void);
@@ -2210,6 +2215,8 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             if (*p == ',') p++; else break;
         }
     }
+    // (a present ends frame `frame`: what the render thread translates next is the game's frame + 1)
+    g_debug_frame = debug_at > 0 && (long)frame + 1 >= debug_at && (long)frame + 1 < debug_at + debug_n;
     if (g_debug_frame) LOG("===== debug frame %llu =====\n", (unsigned long long)frame);
     {   // LARECOMP_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png
         static const char *next;
@@ -2313,14 +2320,11 @@ static void present_hooks(void) {
     save_editor_frame(total_frames);
     extern void vk_level_change_check(void);
     vk_level_change_check();
-    static long debug_at = -1;
     if (debug_at < 0) { const char *e = ENV("LARECOMP_DEBUG_FRAME"); debug_at = e ? atol(e) : 0; }
     extern volatile int g_debug_frame_request;
     if (g_debug_frame_request) { g_debug_frame_request = 0; debug_at = (long)total_frames + 1; }
     // LARECOMP_DEBUG_FRAMES=<n> (with LARECOMP_DEBUG_FRAME / F9): dump n consecutive frames (build/pass_<frame>_NNN.png)
-    static long debug_n = -1;
     if (debug_n < 0) { const char *e = ENV("LARECOMP_DEBUG_FRAMES"); debug_n = e && atol(e) > 1 ? atol(e) : 1; }
-    g_debug_frame = debug_at && total_frames >= (uint64_t)debug_at && total_frames < (uint64_t)debug_at + (uint64_t)debug_n;
 }
 
 void backend_present(NvnTexture *t) {

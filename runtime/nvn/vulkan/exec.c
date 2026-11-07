@@ -1514,6 +1514,7 @@ bool renderer_texture_level_fresh(NvnTexture *t);
 bool renderer_texture_frame_fresh(NvnTexture *t);
 void renderer_texture_mark_presented(NvnTexture *t);
 uint64_t renderer_present_count(void);
+uint64_t renderer_exec_frame(void);
 void renderer_save_texture_tex(TexBackend *b, const char *path);
 static float pass_sx = 1, pass_sy = 1;
 static float vp_sx = 1, vp_sy = 1, vp_ox = 0, vp_oy = 0;
@@ -1587,6 +1588,9 @@ static inline bool ss_need(uint32_t bit, bool same) {
 
 static void vk_end_pass_at(int line);
 void vk_end_pass(void) { vk_end_pass_at(0); }
+// (the targets the open pass draws to, for the F9 dump: a pass mostly ends lazily, at the next draw, by which time st.rt
+// already names the next pass's - the dump saved that one, before anything was drawn in it)
+static RtState debug_pass_rt;
 #define vk_end_pass() vk_end_pass_at(__LINE__)
 static void vk_end_pass_at(int line) {
     if (!in_pass) return;
@@ -1594,22 +1598,22 @@ static void vk_end_pass_at(int line) {
     rec_CmdEndRendering(vk_cmd());
     in_pass = false;
     if (g_gpuprof_frame) gp_mark(vk_cmd(), "  (pass end: its stores, and what comes before the next mark)");
-    if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
+    if (g_debug_frame && debug_pass_rt.ncolor && debug_pass_rt.color[0] && debug_pass_rt.color[0]->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
         static int multi = -1;
         if (multi < 0) multi = ENV("LARECOMP_DEBUG_FRAMES") != NULL;
-        if (multi && renderer_present_count() != debug_pass_frame) { debug_pass_frame = renderer_present_count(); debug_pass_no = 0; }
+        if (multi && renderer_exec_frame() != debug_pass_frame) { debug_pass_frame = renderer_exec_frame(); debug_pass_no = 0; }
         if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d.png", (unsigned long long)debug_pass_frame, debug_pass_no++);
         else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
-        renderer_save_texture_tex(st.rt.color[0]->backend, path);
-        for (int ci = 1; ci < st.rt.ncolor; ci++) {  // (multiple render targets: the others as _c<i>)
-            if (!st.rt.color[ci] || !st.rt.color[ci]->backend) continue;
+        renderer_save_texture_tex(debug_pass_rt.color[0]->backend, path);
+        for (int ci = 1; ci < debug_pass_rt.ncolor; ci++) {  // (multiple render targets: the others as _c<i>)
+            if (!debug_pass_rt.color[ci] || !debug_pass_rt.color[ci]->backend) continue;
             char cpath[300];
             snprintf(cpath, sizeof cpath, "%.*s_c%d.png", (int)strlen(path) - 4, path, ci);
-            renderer_save_texture_tex(st.rt.color[ci]->backend, cpath);
+            renderer_save_texture_tex(debug_pass_rt.color[ci]->backend, cpath);
         }
-        TexBackend *tb = st.rt.color[0]->backend;
+        TexBackend *tb = debug_pass_rt.color[0]->backend;
         if (tb->width == 1 && tb->height == 1 && tb->format == VK_FORMAT_R32G32B32A32_SFLOAT) {  // (exposure: the raw value)
             VkSpan out = vk_readback(16);
             VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {1, 1, 1}};
@@ -1627,7 +1631,7 @@ static void vk_end_pass_at(int line) {
             char lpath[300];
             snprintf(lpath, sizeof lpath, "%.*s_l%u.png", (int)strlen(path) - 4, path, ly);
             raw_layer = ly;
-            renderer_save_texture_tex(st.rt.color[0]->backend, lpath);
+            renderer_save_texture_tex(debug_pass_rt.color[0]->backend, lpath);
             raw_layer = 0;
         }
     }
@@ -1873,6 +1877,7 @@ static void begin_pass(void) {
     rec_CmdBeginRendering(cb, &ri);
     ss_forget();  // (whatever ran between the passes may have set its own state)
     in_pass = true;
+    if (g_debug_frame) debug_pass_rt = st.rt;
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     stat_passes++;
     subr_now.passes++, subr_now.w = pass_w, subr_now.h = pass_h, subr_now.ncolor = pass_ncolor;
