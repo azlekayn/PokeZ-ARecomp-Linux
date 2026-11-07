@@ -42,6 +42,7 @@ Settings g_settings = {
     .fg_thresh = 2.0f,     // (px of motion; static things keep the current frame)
     .za_royale_random = false,  // (Pokémon Z-A: re-roll the night Z-A Royale trainers each load)
     .za_royale_delta = 5,
+    .camera_distance = 1.0f,
     .frame_dt = true,      // (the world step from a fixed-timestep accumulator: the same speed at any frame rate)
     .inv_keys = true,
     .tracker = true,
@@ -235,6 +236,7 @@ void settings_load(void) {
         else if (!strcmp(key, "frame_dt")) g_settings.frame_dt = atoi(val) != 0;
         else if (!strcmp(key, "za_royale_random")) g_settings.za_royale_random = atoi(val) != 0;
         else if (!strcmp(key, "za_royale_delta")) g_settings.za_royale_delta = atoi(val);
+        else if (!strcmp(key, "camera_distance")) { float v = (float)atof(val); g_settings.camera_distance = v < 0.8f ? 0.8f : v > 2.0f ? 2.0f : v; }
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
         else if (!strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;
@@ -345,6 +347,7 @@ void settings_save(void) {
     fprintf(f, "frame_dt = %d\n", g_settings.frame_dt);
     fprintf(f, "za_royale_random = %d\n", g_settings.za_royale_random);
     fprintf(f, "za_royale_delta = %d\n", g_settings.za_royale_delta);
+    fprintf(f, "camera_distance = %.2f\n", g_settings.camera_distance);
     fprintf(f, "tex_dump = %d\n", g_settings.tex_dump);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");

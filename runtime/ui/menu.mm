@@ -840,6 +840,7 @@ static void tab_display(void) {
 }
 
 extern "C" bool cosmetics_seed_on(void);  // runtime/cosmetics_seed.c
+extern "C" bool za_camera_available(void);  // runtime/hle/za_camera.c
 
 // Cosmetics: tunic / heart colours, live (runtime/nvn/texpatch.c), and recolours by draw (runtime/nvn/recolour*.c);
 // a seed made with "Random cosmetics" fills the rows left on Default (shown as "Seed: <colour>")
@@ -1161,6 +1162,12 @@ static void tab_game(void) {
                       "O idioma dos textos do jogo, como a configuração do próprio sistema. Vale quando o jogo reinicia: "
                       "Sair > Tela inicial, depois Jogar. (Um mod de tradução, como o PT-BR, vai em Mods na tela inicial.)"));
     }
+    if (za_camera_available())  // (runtime/hle/za_camera.c: changes at once, in game)
+        opt_slider(TR("Camera distance", "Distância da câmera"), &g_settings.camera_distance, 0.8f, 2.0f, 0.05f, 1.0f, "%.2fx",
+                   TR("How far behind you the camera follows: 1x is the game's own, and the height goes with it, so the "
+                      "angle stays. Changes at once. Indoors, battles and cutscenes keep their own cameras.",
+                      "A que distância a câmera segue você: 1x é a do próprio jogo, e a altura acompanha, então o ângulo "
+                      "continua igual. Muda na hora. Interiores, batalhas e cenas mantêm as próprias câmeras."));
     opt_section(TR("This menu", "Este menu"));
     opt_button(TR("Shortcuts", "Atalhos"),
                TR("Open / close: F1, Esc, the controller's Home / Xbox / PlayStation button, or Back + Start.\n"

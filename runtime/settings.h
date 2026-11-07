@@ -119,6 +119,7 @@ typedef struct {
     bool za_royale_random;  // Pokémon Z-A: re-roll the night Z-A Royale trainers each load, so every night differs
                             // (runtime/hle/royale_random.c; needs the unpacked trainer table as a mod). Off by default.
     int za_royale_delta;    // its level +/- around each trainer's own level (default 5)
+    float camera_distance;  // Pokémon Z-A: the follow camera's distance, 1 = the game's (F1 > Game; runtime/hle/za_camera.c)
     bool frame_dt;    // Pokémon Z-A: the world's step from a fixed-timestep accumulator (runtime/hle/framepace.c
                       // rt_za_frame_dt) - the same game speed at any frame rate. Off: the game's own step (slow motion
                       // below 60 fps). On by default.

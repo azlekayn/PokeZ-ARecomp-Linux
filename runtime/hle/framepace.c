@@ -114,6 +114,8 @@ uint64_t rt_za_frame_dt(uint64_t real_ns) {
     za_probe_frame();
     extern void za_audio_frame(void);  // (za_audio.c: F1's music / effects / cries, on the thread that may call the game)
     za_audio_frame();
+    extern void za_camera_frame(void);  // (za_camera.c: starts F1's camera distance)
+    za_camera_frame();
     if (!g_settings.frame_dt) { was_on = false, za_step_n = 0; return real_ns; }
     // The duration the game hands us ([x1,#8]) is NOT its frame period: measured at a steady 60 fps it is ~8.5 ms (its
     // CPU-busy time), so the game's own bands read 0 every frame and an accumulator built on it never advances the
