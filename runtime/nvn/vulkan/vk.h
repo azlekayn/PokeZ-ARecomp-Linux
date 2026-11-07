@@ -143,6 +143,7 @@ typedef struct {
     // baked into each pipeline - fewer pipelines. Off: no extension / feature, or LARECOMP_VK_DYN_VERTEX=0.
     bool vids;
     PFN_vkCmdSetVertexInputEXT set_vertex_input;
+    PFN_vkCmdSetDepthBias2EXT set_depth_bias2;  // (VK_EXT_depth_bias_control: exec.c, the game's 24-bit depth held as float)
     // LARECOMP_VK_GPL_PROBE=1 only (exec.c gpl_probe, measurement): VK_EXT_graphics_pipeline_library enabled
     bool gpl_probe;
     bool map_placed, unmap_reserve;  // VK_EXT_map_memory_placed: driver memory mapped at a given address (exec.c guest_heap_dmabuf)

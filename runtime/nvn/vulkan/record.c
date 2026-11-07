@@ -784,6 +784,17 @@ void rec_CmdEndRendering(VkCommandBuffer cb) {
 CMD_ARGS(CmdSetDepthBias, float c, k, s;)
 static void CmdSetDepthBias_run(const void *p) { const CmdSetDepthBiasArgs *a = p; vkCmdSetDepthBias(a->cb, a->c, a->k, a->s); }
 void rec_CmdSetDepthBias(VkCommandBuffer cb, float c, float k, float s) { CMD_QUEUE(CmdSetDepthBias, cb, c, k, s); }
+// (named as the macro's direct call wants it, with no recorder: LARECOMP_VK_RECORDER=0)
+static void vkCmdSetDepthBiasExact(VkCommandBuffer cb, float c, float k, float s) {
+    VkDepthBiasRepresentationInfoEXT r = {.sType = VK_STRUCTURE_TYPE_DEPTH_BIAS_REPRESENTATION_INFO_EXT,
+                                          .depthBiasRepresentation = VK_DEPTH_BIAS_REPRESENTATION_FLOAT_EXT, .depthBiasExact = VK_TRUE};
+    VkDepthBiasInfoEXT i = {.sType = VK_STRUCTURE_TYPE_DEPTH_BIAS_INFO_EXT, .pNext = &r, .depthBiasConstantFactor = c,
+                            .depthBiasClamp = k, .depthBiasSlopeFactor = s};
+    g_vk.set_depth_bias2(cb, &i);
+}
+CMD_ARGS(CmdSetDepthBiasExact, float c, k, s;)
+static void CmdSetDepthBiasExact_run(const void *p) { const CmdSetDepthBiasExactArgs *a = p; vkCmdSetDepthBiasExact(a->cb, a->c, a->k, a->s); }
+void rec_CmdSetDepthBiasExact(VkCommandBuffer cb, float c, float k, float s) { CMD_QUEUE(CmdSetDepthBiasExact, cb, c, k, s); }
 
 #define CMD_BOOL(name) \
     CMD_ARGS(name, VkBool32 v;) \

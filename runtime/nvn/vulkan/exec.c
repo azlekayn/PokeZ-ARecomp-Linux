@@ -7312,9 +7312,22 @@ static void draw_(CmdRec *r, bool indexed) {
         if (off < 0) off = ENV("LARECOMP_NO_DEPTH_BIAS") != NULL;
         bool on = (st.poly[3] & 4) && !off;
         if (on) memcpy(f, st.poly_offset, sizeof f);
+        // The game's depth bias counts in steps of its 24-bit depth (2^-24 each, everywhere), but DEPTH24 is held as D32
+        // float, and DEPTH24_STENCIL8 too on AMD: there a step is the float's own, 2^(exponent - 23), and with reversed depth
+        // most of a scene sits at small values, where that is up to hundreds of times smaller. Decals then fight
+        // the ground under them: fine lines and chevrons that change with the view, at any setting. So its size is
+        // given outright, as on a real 24-bit image. LARECOMP_VK_DEPTH_BIAS_EXACT=0 (device.c): the float's own.
+        TexBackend *dbk = st.rt.depth ? st.rt.depth->backend : NULL;
+        bool exact = on && f[1] != 0 && g_vk.set_depth_bias2 && dbk && (st.rt.depth->format == 0x33 || st.rt.depth->format == 0x35) &&
+                     (dbk->format == VK_FORMAT_D32_SFLOAT || dbk->format == VK_FORMAT_D32_SFLOAT_S8_UINT);
         if (equal_tol) { f[1] -= 8; on = true; }  // (see the EQUAL comment above: a few depth ulps nearer)
+        if (exact) f[1] /= 16777216.0f;
         if (ss_need(SS_DBE, ss.dbe == (VkBool32)on)) { ss.dbe = on; rec_CmdSetDepthBiasEnable(cb, on); }
-        if (ss_need(SS_DB, !memcmp(ss.db, f, sizeof f))) { memcpy(ss.db, f, sizeof f); rec_CmdSetDepthBias(cb, f[1], f[2], f[0]); }
+        if (ss_need(SS_DB, !memcmp(ss.db, f, sizeof f))) {
+            memcpy(ss.db, f, sizeof f);
+            if (exact) rec_CmdSetDepthBiasExact(cb, f[1], f[2], f[0]);
+            else rec_CmdSetDepthBias(cb, f[1], f[2], f[0]);
+        }
     }
 
     // ---- textures first (their scales feed the widescreen decision and the rscale table), then the viewport

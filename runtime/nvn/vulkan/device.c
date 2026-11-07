@@ -420,6 +420,18 @@ static void create_device(void) {
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     g_fault_ext = fault;
+    // The depth bias in a set size whatever the depth image's format (exec.c, the game's 24-bit depth held as float).
+    // LARECOMP_VK_DEPTH_BIAS_EXACT=0: off
+    VkPhysicalDeviceDepthBiasControlFeaturesEXT dbc_feat = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_BIAS_CONTROL_FEATURES_EXT};
+    bool depth_bias2 = false;
+    if (has_ext(ep, ne, VK_EXT_DEPTH_BIAS_CONTROL_EXTENSION_NAME) &&
+        !(getenv("LARECOMP_VK_DEPTH_BIAS_EXACT") && !atoi(getenv("LARECOMP_VK_DEPTH_BIAS_EXACT")))) {
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &dbc_feat};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+        depth_bias2 = dbc_feat.depthBiasControl && dbc_feat.floatRepresentation && dbc_feat.depthBiasExact;
+        dbc_feat.pNext = NULL;
+    }
+    if (depth_bias2) ext[n_ext++] = VK_EXT_DEPTH_BIAS_CONTROL_EXTENSION_NAME;
     // Full quads and derivatives over the whole 2x2 quad, helpers included, and quads together again after a branch or
     // a loop: what the game's own derivatives (SHFL + FSWZADD: eyes, hair) need, defined by these two extensions instead
     // of left to the driver (AMD's helpers sit out quad swaps: #74 #95 #144). Used by translate.c quad_control_on
@@ -637,6 +649,11 @@ static void create_device(void) {
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};
+    if (depth_bias2) {  // (enabled as found above: only what's used)
+        dbc_feat.depthBiasControl = VK_TRUE, dbc_feat.floatRepresentation = VK_TRUE, dbc_feat.depthBiasExact = VK_TRUE;
+        dbc_feat.leastRepresentableValueForceUnormRepresentation = VK_FALSE;
+        dbc_feat.pNext = f.pNext, f.pNext = &dbc_feat;
+    }
     if (g_vk.quad_control) {  // (enabled as found above)
         qc_feat.shaderQuadControl = VK_TRUE, mr_feat.shaderMaximalReconvergence = VK_TRUE;
         mr_feat.pNext = f.pNext, qc_feat.pNext = &mr_feat, f.pNext = &qc_feat;
@@ -724,6 +741,9 @@ static void create_device(void) {
         VK_API_VERSION_MAJOR(g_vkc.api), VK_API_VERSION_MINOR(g_vkc.api), ENV("LARECOMP_VK_COMPAT") ? " (LARECOMP_VK_COMPAT)" : "",
         g_vkc.render_pass ? "no (render passes)" : "yes", g_vkc.sync1 ? "no (Vulkan 1.0 barriers)" : "yes",
         g_vkc.no_eds1 ? "no (in the pipelines)" : "yes", g_vkc.no_eds2 ? "no (in the pipelines)" : "yes");
+    if (depth_bias2) g_vk.set_depth_bias2 = (PFN_vkCmdSetDepthBias2EXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetDepthBias2EXT");
+    LOG("[vk] depth bias on a float depth image standing in for a 24-bit one: %s (LARECOMP_VK_DEPTH_BIAS_EXACT)\n",
+        g_vk.set_depth_bias2 ? "the 24-bit size (VK_EXT_depth_bias_control)" : "the float format's own, smaller near the far plane");
     if (g_vk.vids) {
         g_vk.set_vertex_input = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetVertexInputEXT");
         if (!g_vk.set_vertex_input) g_vk.vids = false;

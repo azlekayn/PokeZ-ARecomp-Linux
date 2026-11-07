@@ -112,6 +112,7 @@ void rec_CmdSetViewport(VkCommandBuffer cb, uint32_t first, uint32_t n, const Vk
 void rec_CmdSetScissor(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkRect2D *r);
 void rec_CmdSetBlendConstants(VkCommandBuffer cb, const float c[4]);
 void rec_CmdSetDepthBias(VkCommandBuffer cb, float constant, float clamp, float slope);
+void rec_CmdSetDepthBiasExact(VkCommandBuffer cb, float constant, float clamp, float slope);  // (constant: in depth units itself)
 void rec_CmdSetDepthBiasEnable(VkCommandBuffer cb, VkBool32 on);
 void rec_CmdSetDepthTestEnable(VkCommandBuffer cb, VkBool32 on);
 void rec_CmdSetDepthWriteEnable(VkCommandBuffer cb, VkBool32 on);
