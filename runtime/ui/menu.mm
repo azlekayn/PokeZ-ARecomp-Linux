@@ -432,6 +432,13 @@ static void drain_events(ImGuiIO &io) {
 }
 
 static bool menu_la_tabs = true;  // tabs_body: Link's Awakening's tabs and rows are shown (false: ZA Recomp's own set)
+static bool menu_in_game = true;  // tabs_body: false on the start screen, where nothing of the game has run yet
+// Pokémon Z-A's own rows: g_za_frame_hook only says so once the game has started, but the start screen is ZA Recomp's own,
+// and these are saved settings the game reads when it starts (they were missing from there)
+static bool za_rows(void) {
+    extern bool g_za_frame_hook;
+    return g_za_frame_hook || !menu_in_game;
+}
 extern "C" bool menu_la_rows(void) { return menu_la_tabs; }  // (runtime/ui/controls_ui.mm)
 extern "C" void renderer_get_scale(float *sx, float *sy);
 extern "C" int input_pad_family(void);  // runtime/hle/input.c
@@ -458,8 +465,8 @@ static void tab_display(void) {
     opt_toggle(TR("Show FPS", "Mostrar FPS"), &g_settings.show_fps, false,
                TR("Shows the frame rate in the top right corner.", "Mostra a taxa de quadros no canto superior direito."));
     {   // Pokémon Z-A's frame mode (runtime/hle/framepace.c rt_za_frame_cfg): applies from the next frame
-        extern bool g_za_frame_hook, g_fps60_fell_back;
-        if (g_za_frame_hook) {
+        extern bool g_fps60_fell_back;
+        if (za_rows()) {
             int fr = g_settings.fps60 ? (g_settings.fps60_lock ? 2 : 1) : 0;
             const char *rates[] = {TR("30 fps (Switch)", "30 fps (Switch)"), TR("60 fps (experimental)", "60 fps (experimental)"),
                                    TR("60 fps (always)", "60 fps (sempre)")};
@@ -546,8 +553,7 @@ static void tab_display(void) {
     }
 #endif
     {   // Pokémon Z-A's dynamic resolution (runtime/nvn/vulkan/exec.c vk_counter_mode)
-        extern bool g_za_frame_hook;
-        if (g_za_frame_hook) {
+        if (za_rows()) {
             int dr = g_settings.game_drs ? 1 : 0;
             const char *drs[] = {TR("Off (full)", "Desligada (cheia)"), TR("Game's", "Do jogo")};
             if (opt_choice(TR("Dynamic resolution", "Resolução dinâmica"), &dr, drs, 2, 0,
@@ -559,8 +565,7 @@ static void tab_display(void) {
         }
     }
     {   // which machine's defaults the costly options take (settings_profile_deck): read once, at the start
-        extern bool g_za_frame_hook;
-        if (g_za_frame_hook) {
+        if (za_rows()) {
             int pp = g_settings.perf_profile;
             const char *pps[] = {TR("Auto", "Auto"), TR("Steam Deck", "Steam Deck"), TR("Desktop", "Desktop")};
             if (opt_choice(TR("Performance profile", "Perfil de desempenho"), &pp, pps, 3, 0,
@@ -572,8 +577,7 @@ static void tab_display(void) {
         }
     }
     {   // the mode the game is told it runs in (runtime/services/am.c): read when the game starts
-        extern bool g_za_frame_hook;
-        if (g_za_frame_hook) {
+        if (za_rows()) {
             int hh = g_settings.opmode;
             const char *modes[] = {TR("Auto (handheld on a Steam Deck)", "Auto (portátil no Steam Deck)"),
                                    TR("Docked (1080p)", "Na base (1080p)"), TR("Handheld (720p)", "Portátil (720p)")};
@@ -790,8 +794,7 @@ static void tab_display(void) {
 #endif
 #ifndef __APPLE__
     {   // frame generation (vulkan/exec.c vk_fg_build; Pokémon Z-A's depth-derived motion vectors)
-        extern bool g_za_frame_hook;
-        if (!la && g_za_frame_hook) {
+        if (!la && za_rows()) {
             opt_toggle(TR("Frame generation", "Geração de quadros"), &g_settings.framegen, false,
                        TR("Shows a generated frame between each two, so the game appears at twice its rate (60 -> 120). "
                           "The generated frame blends the two around things that move; static things and the HUD keep the "
@@ -995,7 +998,10 @@ static void tab_audio(void) {
     opt_toggle(TR("Movie audio", "Som dos vídeos"), &g_settings.movie_audio, true,
                TR("Sound in the game's movies. Applies the next time a movie starts.",
                   "O som dos vídeos do jogo. Vale a partir do próximo vídeo."));
-    if (!g_game_is_la) tab_music_rows();
+    if (!menu_in_game)  // (they read the running game: its options object, the track playing now)
+        ImGui::TextDisabled("%s", TR("Music, sound effect and cry volumes, and replacing music: F1 in game.",
+                                     "Volumes de música, efeitos e gritos, e trocar músicas: F1 no jogo."));
+    else if (!g_game_is_la) tab_music_rows();
     opt_end();
 }
 
@@ -1330,6 +1336,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     // Pokémon Z-A (ZA Recomp's start screen, or the game loaded): Controls, Video, Audio, Game, Quit. Link's Awakening
     // keeps its own set (randomizer, cheats, warp, save editor...). (ids stay: test hooks)
     menu_la_tabs = in_game && g_game_is_la;
+    menu_in_game = in_game;
     if (prelaunch) tabs[ntabs++] = {TR("Files", "Arquivos"), -1, true};
     if (!menu_la_tabs) {
         const char *names[] = {TR("Controls", "Controles"), TR("Video", "Vídeo"), TR("Audio", "Áudio"), TR("Game", "Jogo"),
